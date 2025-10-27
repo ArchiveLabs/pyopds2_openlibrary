@@ -1,5 +1,7 @@
+import functools
+from typing_extensions import Literal
 import requests
-from typing import List, Optional
+from typing import List, Optional, TypedDict, cast
 from pydantic import BaseModel, Field
 
 from opds2 import (
@@ -10,40 +12,40 @@ from opds2 import (
     Link
 )
 
-class OpenLibraryDataRecord(DataProviderRecord):
+class BookSharedDoc(BaseModel):
+    """Fields shared between OpenLibrary works and editions."""
+    key: Optional[str] = None
+    title: Optional[str] = None
+    subtitle: Optional[str] = None
+    description: Optional[str] = None
+    cover_i: Optional[int] = None
+    ebook_access: Optional[str] = None
+    language: Optional[list[str]] = None
+
+class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
 
     class EditionProvider(BaseModel):
+        """Basically the acquisition info for an edition."""
         access: Optional[str] = None
-        format: Optional[str] = None
+        format: Optional[Literal['web', 'pdf', 'epub', 'audio']] = None
         price: Optional[float] = None
         url: Optional[str] = None
         provider_name: Optional[str] = None
 
-    class EditionDoc(BaseModel):
-        key: Optional[str] = None
-        title: Optional[str] = None
-        cover_i: Optional[int] = None
-        ebook_access: Optional[str] = None
+    class EditionDoc(BookSharedDoc):
+        """Open Library edition document."""
         providers: Optional[list["OpenLibraryDataRecord.EditionProvider"]] = None
 
-    class EditionsInfo(BaseModel):
+    class EditionsResultSet(BaseModel):
         numFound: Optional[int] = None
         start: Optional[int] = None
         numFoundExact: Optional[bool] = None
         docs: Optional[list["OpenLibraryDataRecord.EditionDoc"]] = None
 
-    key: str = Field(..., description="Unique key for the work (e.g. /works/OL27448W)")
-    title: str = Field(..., min_length=1, description="Title of the work")
-    subtitle: Optional[str] = Field(None, description="Subtitle of the work")
     author_key: Optional[list[str]] = Field(None, description="List of author keys")
     author_name: Optional[list[str]] = Field(None, description="List of author names")
-    cover_i: Optional[int] = Field(None, description="Cover image ID")
-    ebook_access: Optional[str] = Field(None, description="Ebook access type (e.g. borrowable)")
-    editions: Optional["OpenLibraryDataRecord.EditionsInfo"] = Field(None, description="Editions information (nested structure)")
-    description: Optional[str] = Field(None, description="Description of the work")
-    providers: Optional[list] = Field(None, description="List of providers")
-    availability: Optional[dict] = Field(None, description="Availability information")
-    language: Optional[list[str]] = Field(None, description="Languages of the work")
+    editions: Optional["OpenLibraryDataRecord.EditionsResultSet"] = Field(None, description="Editions information (nested structure)")
+    number_of_pages_median: Optional[int] = None
     
     @property
     def type(self) -> str:
@@ -51,12 +53,40 @@ class OpenLibraryDataRecord(DataProviderRecord):
         return "http://schema.org/Book"
     
     def links(self) -> List[Link]:
-        return []
+        edition = self.editions.docs[0] if self.editions and self.editions.docs else None
+        book = edition or self
+        links: list[Link] = [
+            Link(
+                rel="self",
+                href=f"{OpenLibraryDataProvider.URL}{book.key}",
+                type="text/html",
+            ),
+            Link(
+                rel="alternate",
+                href=f"{OpenLibraryDataProvider.URL}{book.key}.json",
+                type="application/json",
+            ),
+        ]
+
+        if not edition or not edition.providers:
+            return links
+
+        return links + [
+            Link(
+                href=acquisition.url,
+                rel=f'http://opds-spec.org/acquisition/{acquisition.access}',
+                type=map_ol_format_to_mime(acquisition.format) if acquisition.format else None,
+            )
+            for acquisition in edition.providers
+        ]
     
     def images(self) -> Optional[List[Link]]:
-        if self.cover_i:
-            cover_url = f"https://covers.openlibrary.org/b/id/{self.cover_i}-L.jpg"
-            return [Link(href=cover_url, type="image/jpeg", rel="cover")]
+        edition = self.editions.docs[0] if self.editions and self.editions.docs else None
+        book = edition or self
+        if book.cover_i:
+            return [
+                Link(href=f"https://covers.openlibrary.org/b/id/{book.cover_i}-L.jpg", type="image/jpeg", rel="cover"),
+            ]
         return None
         
     def metadata(self) -> Metadata:
@@ -68,7 +98,7 @@ class OpenLibraryDataRecord(DataProviderRecord):
                         name=name,
                         links=[
                             Link(
-                                href=f"/authors/{key}",
+                                href=f"{OpenLibraryDataProvider.URL}/authors/{key}",
                                 type="text/html",
                                 rel="author"
                             )
@@ -77,14 +107,64 @@ class OpenLibraryDataRecord(DataProviderRecord):
                     for name, key in zip(self.author_name, self.author_key)
                 ]
 
+        edition = self.editions.docs[0] if self.editions and self.editions.docs else None
+        book = edition or self
+
         return Metadata(
             type=self.type,
-            title=self.title,
-            subtitle=self.subtitle,
+            title=book.title,
+            subtitle=book.subtitle,
             author=get_authors(),
-            description=self.description,
-            language=self.language
+            description=book.description,
+            language=[lang for marc_lang in (book.language or []) if (lang := marc_language_to_iso_639_1(marc_lang))],
+            # TODO: Use the edition-specific pagecount
+            numberOfPages=self.number_of_pages_median,
         )
+
+
+class OpenLibraryLanguageStub(TypedDict):
+    key: str
+    identifiers: dict[str, list[str]] | None
+
+
+def map_ol_format_to_mime(ol_format: Literal['web', 'pdf', 'epub', 'audio']) -> Optional[str]:
+    """Map Open Library format strings to MIME types."""
+    mapping = {
+        'web': 'text/html',
+        'pdf': 'application/pdf',
+        'epub': 'application/epub+zip',
+        'audio': 'audio/mpeg',
+    }
+    return mapping.get(ol_format)
+
+
+def marc_language_to_iso_639_1(marc_code: str) -> Optional[str]:
+    """
+    Convert a MARC language code to an iso_639_1 language code using
+    the cached languages map.
+    """
+    return fetch_languages_map().get(marc_code)
+
+
+@functools.cache
+def fetch_languages_map() -> dict[str, str]:
+    """
+    Get a map of MARC language codes (as saved in Open Library search results)
+    to iso_639_1 language names.
+    """
+    r = requests.get("http://openlibrary.org/query.json?type=/type/language&key&identifiers&limit=1000")
+    r.raise_for_status()
+    data = cast(List[OpenLibraryLanguageStub], r.json())
+    languages = {}
+    for lang in data:
+        marc_code = lang["key"].split("/")[-1]
+        identifiers = lang.get("identifiers")
+        if not identifiers:
+            continue
+        iso_codes = identifiers.get("iso_639_1", [])
+        if iso_codes:
+            languages[marc_code] = iso_codes[0]
+    return languages
 
 
 class OpenLibraryDataProvider(DataProvider):
@@ -102,7 +182,8 @@ class OpenLibraryDataProvider(DataProvider):
     ) -> tuple[List[OpenLibraryDataRecord], int]:
         fields = [
             "key", "title", "editions", "description", "providers", "author_name",
-            "cover_i", "availability", "ebook_access", "author_key", "subtitle", "language"
+            "cover_i", "availability", "ebook_access", "author_key", "subtitle", "language",
+            "number_of_pages_median",
         ]
         params = {
             "editions": "true",
@@ -111,7 +192,7 @@ class OpenLibraryDataProvider(DataProvider):
             "limit": limit,
             "fields": ",".join(fields),
         }
-        r = requests.get(f"{}/search.json", params=params)
+        r = requests.get(f"{OpenLibraryDataProvider.URL}/search.json", params=params)
         r.raise_for_status()
         data = r.json()
         docs = data.get("docs", [])
@@ -120,6 +201,6 @@ class OpenLibraryDataProvider(DataProvider):
             # Unpack editions field if present
             if "editions" in doc and isinstance(doc["editions"], dict):
                 doc = dict(doc)
-                doc["editions"] = OpenLibraryDataRecord.EditionsInfo.model_validate(doc["editions"])
+                doc["editions"] = OpenLibraryDataRecord.EditionsResultSet.model_validate(doc["editions"])
             records.append(OpenLibraryDataRecord.model_validate(doc))
         return records, data.get("numFound", 0)
