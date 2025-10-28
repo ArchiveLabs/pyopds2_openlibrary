@@ -1,4 +1,5 @@
 import functools
+import typing
 from typing_extensions import Literal
 import requests
 from typing import List, Optional, TypedDict, cast
@@ -174,11 +175,13 @@ class OpenLibraryDataProvider(DataProvider):
     CATALOG_URL: str = "/opds/catalog"
     SEARCH_URL: str = "/opds/search{?query}"
 
+    @typing.override
     @staticmethod
     def search(
         query: str,
         limit: int = 50,
         offset: int = 0,
+        sort: Optional[str] = None,
     ) -> tuple[List[OpenLibraryDataRecord], int]:
         fields = [
             "key", "title", "editions", "description", "providers", "author_name",
@@ -190,6 +193,7 @@ class OpenLibraryDataProvider(DataProvider):
             "q": query,
             "page": (offset // limit) + 1 if limit else 1,
             "limit": limit,
+            **( {"sort": sort} if sort else {} ),
             "fields": ",".join(fields),
         }
         r = requests.get(f"{OpenLibraryDataProvider.URL}/search.json", params=params)
