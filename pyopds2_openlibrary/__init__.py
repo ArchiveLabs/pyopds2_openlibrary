@@ -79,11 +79,7 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
             return links
 
         return links + [
-            Link(
-                href=acquisition.url,
-                rel=f'http://opds-spec.org/acquisition/{acquisition.access}',
-                type=map_ol_format_to_mime(acquisition.format) if acquisition.format else None,
-            )
+            ol_acquisition_to_opds_acquisition_link(acquisition)
             for acquisition in edition.providers
         ]
     
@@ -132,6 +128,28 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
 class OpenLibraryLanguageStub(TypedDict):
     key: str
     identifiers: dict[str, list[str]] | None
+
+
+def ol_acquisition_to_opds_acquisition_link(acq: OpenLibraryDataRecord.EditionProvider) -> Link:
+    link = Link(
+        href=acq.url,
+        rel=f'http://opds-spec.org/acquisition/{acq.access}',
+        type=map_ol_format_to_mime(acq.format) if acq.format else None,
+    )
+
+    if acq.price:
+        amount, currency = acq.price.split(" ")
+        link.properties = {
+            "price": {
+                "amount": float(amount),
+                "currency": currency,
+            }
+        }
+    
+    if acq.provider_name:
+        link.title = acq.provider_name
+    
+    return link
 
 
 def map_ol_format_to_mime(ol_format: Literal['web', 'pdf', 'epub', 'audio']) -> Optional[str]:
