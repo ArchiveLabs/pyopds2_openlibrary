@@ -8,8 +8,6 @@ from pydantic import BaseModel, Field
 from opds2 import (
     DataProvider,
     DataProviderRecord,
-    SearchRequest,
-    SearchResponse,
     Contributor,
     Metadata,
     Link
@@ -189,7 +187,7 @@ class OpenLibraryDataProvider(DataProvider):
         limit: int = 50,
         offset: int = 0,
         sort: Optional[str] = None,
-    ) -> SearchResponse:
+    ) -> DataProvider.SearchResponse:
         fields = [
             "key", "title", "editions", "description", "providers", "author_name",
             "cover_i", "availability", "ebook_access", "author_key", "subtitle", "language",
@@ -214,4 +212,12 @@ class OpenLibraryDataProvider(DataProvider):
                 doc = dict(doc)
                 doc["editions"] = OpenLibraryDataRecord.EditionsResultSet.model_validate(doc["editions"])
             records.append(OpenLibraryDataRecord.model_validate(doc))
-        return SearchResponse(records, data.get("numFound", 0), SearchRequest(query, limit, offset, sort))
+        return DataProvider.SearchResponse(
+            provider=OpenLibraryDataProvider,
+            records=records,
+            total=data.get("numFound", 0),
+            query=query,
+            limit=limit,
+            offset=offset,
+            sort=sort
+        )
