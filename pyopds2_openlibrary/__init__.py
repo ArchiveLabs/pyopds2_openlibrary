@@ -61,12 +61,17 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
         links: list[Link] = [
             Link(
                 rel="self",
-                href=f"{OpenLibraryDataProvider.URL}{book.key}",
+                href=f"{OpenLibraryDataProvider.BASE_URL}/opds{book.key}",
+                type="application/opds-publication+json",
+            ),
+            Link(
+                rel="alternate",
+                href=f"{OpenLibraryDataProvider.BASE_URL}{book.key}",
                 type="text/html",
             ),
             Link(
                 rel="alternate",
-                href=f"{OpenLibraryDataProvider.URL}{book.key}.json",
+                href=f"{OpenLibraryDataProvider.BASE_URL}{book.key}.json",
                 type="application/json",
             ),
         ]
@@ -101,7 +106,7 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
                         name=name,
                         links=[
                             Link(
-                                href=f"{OpenLibraryDataProvider.URL}/authors/{key}",
+                                href=f"{OpenLibraryDataProvider.BASE_URL}/authors/{key}",
                                 type="text/html",
                                 rel="author"
                             )
@@ -172,9 +177,8 @@ def fetch_languages_map() -> dict[str, str]:
 
 class OpenLibraryDataProvider(DataProvider):
     """Data provider for Open Library records."""
-    URL: str = "https://openlibrary.org"
+    BASE_URL: str = "https://openlibrary.org"
     TITLE: str = "OpenLibrary.org OPDS Service"
-    CATALOG_URL: str = "/opds/catalog"
     SEARCH_URL: str = "/opds/search{?query}"
 
     @typing.override
@@ -198,7 +202,7 @@ class OpenLibraryDataProvider(DataProvider):
             **( {"sort": sort} if sort else {} ),
             "fields": ",".join(fields),
         }
-        r = requests.get(f"{OpenLibraryDataProvider.URL}/search.json", params=params)
+        r = requests.get(f"{OpenLibraryDataProvider.BASE_URL}/search.json", params=params)
         r.raise_for_status()
         data = r.json()
         docs = data.get("docs", [])
