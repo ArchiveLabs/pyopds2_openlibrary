@@ -5,7 +5,7 @@ import requests
 from typing import List, Optional, TypedDict, cast
 from pydantic import BaseModel, Field
 
-from opds2 import (
+from pyopds2 import (
     DataProvider,
     DataProviderRecord,
     Contributor,
