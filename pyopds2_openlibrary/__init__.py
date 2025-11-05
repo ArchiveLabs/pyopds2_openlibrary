@@ -31,7 +31,8 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
         """Basically the acquisition info for an edition."""
         access: Optional[str] = None
         format: Optional[Literal['web', 'pdf', 'epub', 'audio']] = None
-        price: Optional[float] = None
+        price: Optional[str] = None
+        """Book price, eg '0.00 USD'"""
         url: Optional[str] = None
         provider_name: Optional[str] = None
 
