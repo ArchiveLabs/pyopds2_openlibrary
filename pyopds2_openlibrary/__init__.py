@@ -141,7 +141,7 @@ def ol_acquisition_to_opds_acquisition_link(acq: OpenLibraryDataRecord.EditionPr
         amount, currency = acq.price.split(" ")
         link.properties = {
             "price": {
-                "amount": float(amount),
+                "value": float(amount),
                 "currency": currency,
             }
         }
