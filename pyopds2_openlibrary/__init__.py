@@ -2,7 +2,7 @@ import functools
 import typing
 from typing_extensions import Literal
 import requests
-from typing import List, Optional, TypedDict, cast
+from typing import List, Literal, Optional, TypedDict, cast
 from pydantic import BaseModel, Field
 
 from pyopds2 import (
@@ -22,8 +22,12 @@ class BookSharedDoc(BaseModel):
     cover_i: Optional[int] = None
     ebook_access: Optional[str] = None
     language: Optional[list[str]] = None
+    ia: Optional[list[str]] = None
 
 class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
+
+    class EditionAvailability(BaseModel):
+        status: Literal["borrow_available", "borrow_unavailable",  "open", "private", "error"]
 
     class EditionProvider(BaseModel):
         """Basically the acquisition info for an edition."""
@@ -36,6 +40,7 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
 
     class EditionDoc(BookSharedDoc):
         """Open Library edition document."""
+        availability: Optional["OpenLibraryDataRecord.EditionAvailability"] = None
         providers: Optional[list["OpenLibraryDataRecord.EditionProvider"]] = None
 
     class EditionsResultSet(BaseModel):
@@ -48,15 +53,16 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
     author_name: Optional[list[str]] = Field(None, description="List of author names")
     editions: Optional["OpenLibraryDataRecord.EditionsResultSet"] = Field(None, description="Editions information (nested structure)")
     number_of_pages_median: Optional[int] = None
-    
+
     @property
     def type(self) -> str:
         """Type _should_ be improved to dynamically return type based on record data."""
         return "http://schema.org/Book"
-    
+
     def links(self) -> List[Link]:
         edition = self.editions.docs[0] if self.editions and self.editions.docs else None
         book = edition or self
+
         links: list[Link] = [
             Link(
                 rel="self",
@@ -79,10 +85,10 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
             return links
 
         return links + [
-            ol_acquisition_to_opds_acquisition_link(acquisition)
+            ol_acquisition_to_opds_acquisition_link(edition, acquisition)
             for acquisition in edition.providers
         ]
-    
+
     def images(self) -> Optional[List[Link]]:
         edition = self.editions.docs[0] if self.editions and self.editions.docs else None
         book = edition or self
@@ -91,7 +97,7 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
                 Link(href=f"https://covers.openlibrary.org/b/id/{book.cover_i}-L.jpg", type="image/jpeg", rel="cover"),
             ]
         return None
-        
+
     def metadata(self) -> Metadata:
         """Return this record as OPDS Metadata."""
         def get_authors() -> Optional[List[Contributor]]:
@@ -130,25 +136,35 @@ class OpenLibraryLanguageStub(TypedDict):
     identifiers: dict[str, list[str]] | None
 
 
-def ol_acquisition_to_opds_acquisition_link(acq: OpenLibraryDataRecord.EditionProvider) -> Link:
+def ol_acquisition_to_opds_acquisition_link(edition: OpenLibraryDataRecord.EditionDoc, acq: OpenLibraryDataRecord.EditionProvider) -> Link:
     link = Link(
         href=acq.url,
         rel=f'http://opds-spec.org/acquisition/{acq.access}',
         type=map_ol_format_to_mime(acq.format) if acq.format else None,
     )
 
+    link.properties = {}
+
+    if acq.provider_name == "ia":
+        link.properties['more'] = {
+            "href": f"https://archive.org/services/loans/loan/?action=webpub&identifier={edition.ia[0]}&opds=1",
+            "rel": "http://opds-spec.org/acquisition/",
+            "type": "application/opds-publication+json"
+        }
+
+        if edition.availability and 'borrow' in edition.availability.status:
+            link.properties["availability"] = edition.availability.status.replace("borrow_", "")
+
     if acq.price:
         amount, currency = acq.price.split(" ")
-        link.properties = {
-            "price": {
-                "value": float(amount),
-                "currency": currency,
-            }
+        link.properties["price"] = {
+            "value": float(amount),
+            "currency": currency,
         }
-    
+
     if acq.provider_name:
         link.title = acq.provider_name
-    
+
     return link
 
 
@@ -207,7 +223,7 @@ class OpenLibraryDataProvider(DataProvider):
         sort: Optional[str] = None,
     ) -> DataProvider.SearchResponse:
         fields = [
-            "key", "title", "editions", "description", "providers", "author_name",
+            "key", "title", "editions", "description", "providers", "author_name", "ia",
             "cover_i", "availability", "ebook_access", "author_key", "subtitle", "language",
             "number_of_pages_median",
         ]
