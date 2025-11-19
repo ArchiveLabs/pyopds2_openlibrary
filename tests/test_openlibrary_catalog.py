@@ -191,7 +191,9 @@ class TestOpenLibraryDataRecord:
         images = record_with_cover.images()
         assert images is not None
         assert len(images) == 1
-        assert "covers.openlibrary.org" in images[0].href
+        # Verify cover URL structure
+        assert images[0].href.startswith("https://covers.openlibrary.org/")
+        assert "8739161" in images[0].href
 
         # Record without cover
         record_without_cover = OpenLibraryDataRecord(
