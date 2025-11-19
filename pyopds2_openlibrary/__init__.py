@@ -2,7 +2,7 @@ import functools
 import typing
 from typing_extensions import Literal
 import requests
-from typing import List, Literal, Optional, TypedDict, cast
+from typing import List, Optional, TypedDict, cast
 from pydantic import BaseModel, Field
 
 from pyopds2 import (
@@ -12,6 +12,7 @@ from pyopds2 import (
     Metadata,
     Link
 )
+
 
 class BookSharedDoc(BaseModel):
     """Fields shared between OpenLibrary works and editions."""
@@ -23,6 +24,7 @@ class BookSharedDoc(BaseModel):
     ebook_access: Optional[str] = None
     language: Optional[list[str]] = None
     ia: Optional[list[str]] = None
+
 
 class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
 
@@ -49,9 +51,15 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
         numFoundExact: Optional[bool] = None
         docs: Optional[list["OpenLibraryDataRecord.EditionDoc"]] = None
 
-    author_key: Optional[list[str]] = Field(None, description="List of author keys")
-    author_name: Optional[list[str]] = Field(None, description="List of author names")
-    editions: Optional["OpenLibraryDataRecord.EditionsResultSet"] = Field(None, description="Editions information (nested structure)")
+    author_key: Optional[list[str]] = Field(
+        None, description="List of author keys"
+    )
+    author_name: Optional[list[str]] = Field(
+        None, description="List of author names"
+    )
+    editions: Optional["OpenLibraryDataRecord.EditionsResultSet"] = Field(
+        None, description="Editions information (nested structure)"
+    )
     number_of_pages_median: Optional[int] = None
 
     @property
@@ -136,7 +144,10 @@ class OpenLibraryLanguageStub(TypedDict):
     identifiers: dict[str, list[str]] | None
 
 
-def ol_acquisition_to_opds_acquisition_link(edition: OpenLibraryDataRecord.EditionDoc, acq: OpenLibraryDataRecord.EditionProvider) -> Link:
+def ol_acquisition_to_opds_acquisition_link(
+    edition: OpenLibraryDataRecord.EditionDoc,
+    acq: OpenLibraryDataRecord.EditionProvider
+) -> Link:
     link = Link(
         href=acq.url,
         rel=f'http://opds-spec.org/acquisition/{acq.access}',
@@ -232,7 +243,7 @@ class OpenLibraryDataProvider(DataProvider):
             "q": query,
             "page": (offset // limit) + 1 if limit else 1,
             "limit": limit,
-            **( {"sort": sort} if sort else {} ),
+            **({'sort': sort} if sort else {}),
             "fields": ",".join(fields),
         }
         r = requests.get(f"{OpenLibraryDataProvider.BASE_URL}/search.json", params=params)
