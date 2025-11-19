@@ -14,6 +14,6 @@ python
 ```python:
 from pyopds2 import Catalog
 from pyopds2_openlibrary import OpenLibraryDataProvider
-catalog = Catalog.create(OpenLibraryProvider.search("Libraries of the future by J C R Licklider"))
+catalog = Catalog.create(OpenLibraryDataProvider.search("Libraries of the future by J C R Licklider"))
 catalog.model_dump_json()
 ```
