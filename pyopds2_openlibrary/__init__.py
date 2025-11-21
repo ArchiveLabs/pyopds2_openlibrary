@@ -170,16 +170,15 @@ def ol_acquisition_to_opds_acquisition_link(
             "rel": "http://opds-spec.org/acquisition/",
             "type": "application/opds-publication+json"
         }
+    elif acq.provider_name:
+        link.title = acq.provider_name
 
     if acq.price:
         amount, currency = acq.price.split(" ")
         link.properties["price"] = {
             "value": float(amount),
             "currency": currency,
-        }
-
-    if acq.provider_name:
-        link.title = acq.provider_name
+        }        
 
     return link
 
