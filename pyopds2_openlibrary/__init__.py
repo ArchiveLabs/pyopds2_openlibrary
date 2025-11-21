@@ -152,9 +152,17 @@ def ol_acquisition_to_opds_acquisition_link(
         href=acq.url,
         rel=f'http://opds-spec.org/acquisition/{acq.access}',
         type=map_ol_format_to_mime(acq.format) if acq.format else None,
+        properties={}
     )
 
-    link.properties = {}
+    if edition.ebook_access:
+        # Default availability to `unavailable`
+        link.properties["availability"] = "unavailable"
+        if edition.ebook_access == "public":
+            link.properties["availability"] = "available"
+    if edition.availability and 'borrow' in edition.availability.status:
+        # This will need to be expanded once Lenny is an option for borrowing
+        link.properties["availability"] = edition.availability.status.replace("borrow_", "")
 
     if acq.provider_name == "ia":
         link.properties['more'] = {
@@ -162,9 +170,6 @@ def ol_acquisition_to_opds_acquisition_link(
             "rel": "http://opds-spec.org/acquisition/",
             "type": "application/opds-publication+json"
         }
-
-        if edition.availability and 'borrow' in edition.availability.status:
-            link.properties["availability"] = edition.availability.status.replace("borrow_", "")
 
     if acq.price:
         amount, currency = acq.price.split(" ")
