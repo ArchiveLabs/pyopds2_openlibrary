@@ -264,3 +264,22 @@ class TestOpenLibraryDataProvider:
         mock_get.assert_called_once()
         call_args = mock_get.call_args
         assert call_args[1]['params']['sort'] == "rating"
+
+    @patch('pyopds2_openlibrary.fetch_languages_map')
+    def test_availability(self, mock_lang_map):
+        """Minimal availability test using real provider calls (no mocking of responses)."""
+        # keep language map patch to match file style; it doesn't affect the network calls
+        mock_lang_map.return_value = {"eng": "en"}
+
+        def get_availability(book_id):
+            catalog = Catalog.create(OpenLibraryDataProvider.search(book_id))
+            publication = catalog.publications[0]
+            acquisition_link = next((link for link in publication.links if '/acquisition/' in link.rel), None)
+            return acquisition_link.properties['availability']
+
+        standardebooks_openaccess_book = "OL51733541M"
+        assert get_availability(standardebooks_openaccess_book) == 'available'
+        internetarchive_lendable_book = "OL59176589M"
+        assert get_availability(internetarchive_lendable_book) == 'available'
+        internetarchive_printdisabled_book = "OL30032673M"
+        assert get_availability(internetarchive_printdisabled_book) == 'unavailable'
