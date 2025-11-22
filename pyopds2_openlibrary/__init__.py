@@ -229,6 +229,22 @@ class OpenLibraryDataProvider(DataProvider):
     TITLE: str = "OpenLibrary.org OPDS Service"
     SEARCH_URL: str = "/opds/search{?query}"
 
+    @classmethod
+    def bookshelf_link(cls, host="https://archive.org"):
+        return Link(
+            rel="http://opds-spec.org/shelf",
+            href=f"{host}/services/loans/loan/?action=user_bookshelf",
+            type="application/opds+json",
+        )
+
+    @classmethod
+    def profile_link(cls, host="https://archive.org"):
+        return Link(
+            rel="profile",
+            href=f"{host}/services/loans/loan/?action=user_profile",
+            type="application/opds-profile+json",
+        )
+
     @typing.override
     @staticmethod
     def search(
