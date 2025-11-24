@@ -228,31 +228,66 @@ class OpenLibraryDataProvider(DataProvider):
     """Data provider for Open Library records."""
     BASE_URL: str = "https://openlibrary.org"
     TITLE: str = "OpenLibrary.org OPDS Service"
-    SEARCH_URL: str = "/opds/search{?query}"
-
-    # Set Search defaults
-    DataProvider.Search.sort='trending'
-    DataProvider.Search.limit=25
-    
+    SEARCH_URL: str = "/opds/search{?query}"    
     STORED_SEARCHES: dict[str, Search] = {
         "Trending Books": Search(
-            query="trending_score_hourly_sum:[1 TO *] -subject:"content_warning:cover" ebook_access:[borrowable TO *]",
+            query=' '.join([
+                'trending_score_hourly_sum:[1 TO *]',
+                '-subject:"content_warning:cover"',
+                'ebook_access:[borrowable TO *]'
+            ]),
             sort="trending"
         ),
         "Classic Books": Search(
-            query=[
-                'ddc:8*', 'first_publish_year:[* TO 1950]'
+            query=' '.join([
+                'ddc:8*',
+                'first_publish_year:[* TO 1950]',
                 'publish_year:[2000 TO *]',
-                'NOT public_scan_b:false', '-subject:"content_warning:cover"'
-            ].join(' ')
+                'NOT public_scan_b:false',
+                '-subject:"content_warning:cover"'
+            ]),
+            sort="trending"
         ),
         "Romance": Search(
-            query='subject:romance ebook_access:[borrowable TO *] first_publish_year:[1930 TO *] trending_score_hourly_sum:[1 TO *] -subject:"content_warning:cover"',
+            query=' '.join([
+                'subject:romance',
+                'ebook_access:[borrowable TO *]',
+                'first_publish_year:[1930 TO *]',
+                'trending_score_hourly_sum:[1 TO *]',
+                '-subject:"content_warning:cover"'
+            ]),
+            sort='trending,trending_score_hourly_sum',
         ),
         "Kids": Search(
-            query='ebook_access:[borrowable TO *] trending_score_hourly_sum:[1 TO *] (subject_key:(juvenile_audience OR children\'s_fiction OR juvenile_nonfiction OR juvenile_encyclopedias OR juvenile_riddles OR juvenile_poetry OR juvenile_wit_and_humor OR juvenile_limericks OR juvenile_dictionaries OR juvenile_non-fiction) OR subject:("Juvenile literature" OR "Juvenile fiction" OR "pour la jeunesse" OR "pour enfants"),
-        "Thrillers": 'subject:thrillers ebook_access:[borrowable TO *] trending_score_hourly_sum:[1 TO *] -subject:"content_warning:cover"',
-        "Textbooks": 'subject_key:textbooks publish_year:[1990 TO *] ebook_access:[borrowable TO *]'
+            query=' '.join([
+                'ebook_access:[borrowable TO *]',
+                'trending_score_hourly_sum:[1 TO *]',
+                'subject_key:(',
+                'juvenile_audience OR children\'s_fiction OR juvenile_nonfiction OR',
+                'juvenile_encyclopedias OR juvenile_riddles OR juvenile_poetry OR',
+                'juvenile_wit_and_humor OR juvenile_limericks OR juvenile_dictionaries OR',
+                'juvenile_non-fiction) OR',
+                'subject:("Juvenile literature" OR "Juvenile fiction" OR "pour la jeunesse" OR "pour enfants")'
+            ]),
+            sort='random.hourly',
+        ),
+        "Thrillers": Search(
+            query=' '.join([
+                'subject:thrillers',
+                'ebook_access:[borrowable TO *]',
+                'trending_score_hourly_sum:[1 TO *]',
+                '-subject:"content_warning:cover"'
+            ]),
+            sort='trending,trending_score_hourly_sum',
+        ),
+        "Textbooks": Search(
+            query=' '.join([
+                'subject_key:textbooks',
+                'publish_year:[1990 TO *]',
+                'ebook_access:[borrowable TO *]'
+            ]),
+             sort='trending',
+        ),
     }
     
     @classmethod
