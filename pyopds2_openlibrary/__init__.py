@@ -10,7 +10,8 @@ from pyopds2 import (
     DataProviderRecord,
     Contributor,
     Metadata,
-    Link
+    Link,
+    Search
 )
 
 
@@ -229,6 +230,31 @@ class OpenLibraryDataProvider(DataProvider):
     TITLE: str = "OpenLibrary.org OPDS Service"
     SEARCH_URL: str = "/opds/search{?query}"
 
+    # Set Search defaults
+    DataProvider.Search.sort='trending'
+    DataProvider.Search.limit=25
+    
+    STORED_SEARCHES: dict[str, Search] = {
+        "Trending Books": Search(
+            query="trending_score_hourly_sum:[1 TO *] -subject:"content_warning:cover" ebook_access:[borrowable TO *]",
+            sort="trending"
+        ),
+        "Classic Books": Search(
+            query=[
+                'ddc:8*', 'first_publish_year:[* TO 1950]'
+                'publish_year:[2000 TO *]',
+                'NOT public_scan_b:false', '-subject:"content_warning:cover"'
+            ].join(' ')
+        ),
+        "Romance": Search(
+            query='subject:romance ebook_access:[borrowable TO *] first_publish_year:[1930 TO *] trending_score_hourly_sum:[1 TO *] -subject:"content_warning:cover"',
+        ),
+        "Kids": Search(
+            query='ebook_access:[borrowable TO *] trending_score_hourly_sum:[1 TO *] (subject_key:(juvenile_audience OR children\'s_fiction OR juvenile_nonfiction OR juvenile_encyclopedias OR juvenile_riddles OR juvenile_poetry OR juvenile_wit_and_humor OR juvenile_limericks OR juvenile_dictionaries OR juvenile_non-fiction) OR subject:("Juvenile literature" OR "Juvenile fiction" OR "pour la jeunesse" OR "pour enfants"),
+        "Thrillers": 'subject:thrillers ebook_access:[borrowable TO *] trending_score_hourly_sum:[1 TO *] -subject:"content_warning:cover"',
+        "Textbooks": 'subject_key:textbooks publish_year:[1990 TO *] ebook_access:[borrowable TO *]'
+    }
+    
     @classmethod
     def bookshelf_link(cls, host="https://archive.org"):
         return Link(
