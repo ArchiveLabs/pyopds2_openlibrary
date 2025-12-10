@@ -132,7 +132,7 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
             title=book.title,
             subtitle=book.subtitle,
             author=get_authors(),
-            description=book.description,
+            description=book.description or self.description,
             language=[lang for marc_lang in (book.language or []) if (lang := marc_language_to_iso_639_1(marc_lang))],
             # TODO: Use the edition-specific pagecount
             numberOfPages=self.number_of_pages_median,
