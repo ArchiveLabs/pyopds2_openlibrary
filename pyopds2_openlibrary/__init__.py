@@ -252,15 +252,36 @@ class OpenLibraryDataProvider(DataProvider):
         limit: int = 50,
         offset: int = 0,
         sort: Optional[str] = None,
+        facets: Optional[dict[str, str]] = None,
     ) -> DataProvider.SearchResponse:
+        """
+        Search Open Library.
+
+        Args:
+            query: The search query string.
+            limit: Maximum number of results to return.
+            offset: Number of results to skip.
+            sort: Sort order for results.
+            facets: Optional facets to apply. Supported facets:
+                - 'mode': 'ebooks' (default) filters to borrowable items,
+                          'everything' returns all results.
+        """
         fields = [
             "key", "title", "editions", "description", "providers", "author_name", "ia",
             "cover_i", "availability", "ebook_access", "author_key", "subtitle", "language",
             "number_of_pages_median",
         ]
+
+        internal_query = query
+        facets = facets or {}
+        mode = facets.get('mode', 'ebooks')
+
+        if mode == 'ebooks' and 'ebook_access:' not in internal_query:
+            internal_query = f"{internal_query} ebook_access:[borrowable TO *]"
+
         params = {
             "editions": "true",
-            "q": query,
+            "q": internal_query,
             "page": (offset // limit) + 1 if limit else 1,
             "limit": limit,
             **({'sort': sort} if sort else {}),
