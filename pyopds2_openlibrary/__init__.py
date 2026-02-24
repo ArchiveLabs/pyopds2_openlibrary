@@ -273,10 +273,8 @@ class OpenLibraryDataProvider(DataProvider):
         ]
 
         internal_query = query
-        if facets:
-            mode = facets.get('mode', 'ebooks')
-        else:
-            mode = 'ebooks'
+        facets = facets or {}
+        mode = facets.get('mode', 'ebooks')
 
         if mode == 'ebooks' and 'ebook_access:' not in internal_query:
             internal_query = f"{internal_query} ebook_access:[borrowable TO *]"
