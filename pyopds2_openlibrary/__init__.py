@@ -223,6 +223,27 @@ def fetch_languages_map() -> dict[str, str]:
     return languages
 
 
+def _is_currently_available(record: OpenLibraryDataRecord) -> bool:
+    """Check if a record's edition is currently available to read/borrow.
+
+    - Public books are always available.
+    - Borrowable books are available unless explicitly marked borrow_unavailable.
+    - Books with no edition or no ebook access are excluded.
+    """
+    edition = record.editions.docs[0] if record.editions and record.editions.docs else None
+    if not edition:
+        return False
+    if edition.ebook_access == "public":
+        return True
+    if edition.ebook_access == "borrowable":
+        # If availability info is present and says unavailable, filter it out
+        if edition.availability and edition.availability.status == "borrow_unavailable":
+            return False
+        # Otherwise assume borrowable = available
+        return True
+    return False
+
+
 class OpenLibraryDataProvider(DataProvider):
     """Data provider for Open Library records."""
     BASE_URL: str = "https://openlibrary.org"
@@ -273,8 +294,10 @@ class OpenLibraryDataProvider(DataProvider):
         ]
 
         internal_query = query
-        facets = facets or {}
-        mode = facets.get('mode', 'ebooks')
+        if facets:
+            mode = facets.get('mode', 'ebooks')
+        else:
+            mode = 'ebooks'
 
         if mode == 'ebooks' and 'ebook_access:' not in internal_query:
             internal_query = f"{internal_query} ebook_access:[borrowable TO *]"
@@ -298,6 +321,10 @@ class OpenLibraryDataProvider(DataProvider):
                 doc = dict(doc)
                 doc["editions"] = OpenLibraryDataRecord.EditionsResultSet.model_validate(doc["editions"])
             records.append(OpenLibraryDataRecord.model_validate(doc))
+
+        if mode == 'ebooks':
+            records = [r for r in records if _is_currently_available(r)]
+
         return DataProvider.SearchResponse(
             provider=OpenLibraryDataProvider,
             records=records,
