@@ -160,9 +160,12 @@ def ol_acquisition_to_opds_acquisition_link(
         link.properties["availability"] = "unavailable"
         if edition.ebook_access == "public":
             link.properties["availability"] = "available"
-    if edition.availability and 'borrow' in edition.availability.status:
-        # This will need to be expanded once Lenny is an option for borrowing
-        link.properties["availability"] = edition.availability.status.replace("borrow_", "")
+    if edition.availability:
+        status = edition.availability.status
+        if status == "open" or status == "borrow_available":
+            link.properties["availability"] = "available"
+        elif status == "private" or status == "error" or status == "borrow_unavailable":
+            link.properties["availability"] = "unavailable"
 
     if acq.provider_name == "ia":
         link.properties['more'] = {
@@ -284,8 +287,8 @@ class OpenLibraryDataProvider(DataProvider):
             offset: Number of results to skip.
             sort: Sort order for results.
             facets: Optional facets to apply. Supported facets:
-                - 'mode': 'ebooks' (default) filters to borrowable items,
-                          'everything' returns all results.
+                - 'mode': 'everything' (default) returns all results,
+                          'ebooks' filters to currently available ebook items.
         """
         fields = [
             "key", "title", "editions", "description", "providers", "author_name", "ia",
@@ -295,9 +298,9 @@ class OpenLibraryDataProvider(DataProvider):
 
         internal_query = query
         if facets:
-            mode = facets.get('mode', 'ebooks')
+            mode = facets.get('mode', 'everything')
         else:
-            mode = 'ebooks'
+            mode = 'everything'
 
         if mode == 'ebooks' and 'ebook_access:' not in internal_query:
             internal_query = f"{internal_query} ebook_access:[borrowable TO *]"
