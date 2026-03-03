@@ -160,9 +160,12 @@ def ol_acquisition_to_opds_acquisition_link(
         link.properties["availability"] = "unavailable"
         if edition.ebook_access == "public":
             link.properties["availability"] = "available"
-    if edition.availability and 'borrow' in edition.availability.status:
-        # This will need to be expanded once Lenny is an option for borrowing
-        link.properties["availability"] = edition.availability.status.replace("borrow_", "")
+    if edition.availability:
+        status = edition.availability.status
+        if status == "open" or status == "borrow_available":
+            link.properties["availability"] = "available"
+        elif status == "private" or status == "error" or status == "borrow_unavailable":
+            link.properties["availability"] = "unavailable"
 
     if acq.provider_name == "ia":
         link.properties['more'] = {
@@ -223,6 +226,27 @@ def fetch_languages_map() -> dict[str, str]:
     return languages
 
 
+def _is_currently_available(record: OpenLibraryDataRecord) -> bool:
+    """Check if a record's edition is currently available to read/borrow.
+
+    - Public books are always available.
+    - Borrowable books are available unless explicitly marked borrow_unavailable.
+    - Books with no edition or no ebook access are excluded.
+    """
+    edition = record.editions.docs[0] if record.editions and record.editions.docs else None
+    if not edition:
+        return False
+    if edition.ebook_access == "public":
+        return True
+    if edition.ebook_access == "borrowable":
+        # If availability info is present and says unavailable, filter it out
+        if edition.availability and edition.availability.status == "borrow_unavailable":
+            return False
+        # Otherwise assume borrowable = available
+        return True
+    return False
+
+
 class OpenLibraryDataProvider(DataProvider):
     """Data provider for Open Library records."""
     BASE_URL: str = "https://openlibrary.org"
@@ -263,8 +287,8 @@ class OpenLibraryDataProvider(DataProvider):
             offset: Number of results to skip.
             sort: Sort order for results.
             facets: Optional facets to apply. Supported facets:
-                - 'mode': 'ebooks' (default) filters to borrowable items,
-                          'everything' returns all results.
+                - 'mode': 'everything' (default) returns all results,
+                          'ebooks' filters to currently available ebook items.
         """
         fields = [
             "key", "title", "editions", "description", "providers", "author_name", "ia",
@@ -273,8 +297,10 @@ class OpenLibraryDataProvider(DataProvider):
         ]
 
         internal_query = query
-        facets = facets or {}
-        mode = facets.get('mode', 'ebooks')
+        if facets:
+            mode = facets.get('mode', 'everything')
+        else:
+            mode = 'everything'
 
         if mode == 'ebooks' and 'ebook_access:' not in internal_query:
             internal_query = f"{internal_query} ebook_access:[borrowable TO *]"
@@ -298,6 +324,10 @@ class OpenLibraryDataProvider(DataProvider):
                 doc = dict(doc)
                 doc["editions"] = OpenLibraryDataRecord.EditionsResultSet.model_validate(doc["editions"])
             records.append(OpenLibraryDataRecord.model_validate(doc))
+
+        if mode == 'ebooks':
+            records = [r for r in records if _is_currently_available(r)]
+
         return DataProvider.SearchResponse(
             provider=OpenLibraryDataProvider,
             records=records,
