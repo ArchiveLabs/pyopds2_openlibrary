@@ -251,8 +251,6 @@ def _is_currently_available(record: OpenLibraryDataRecord) -> bool:
     if edition.availability and edition.availability.status == "borrow_unavailable":
         return False
     return True
-
-
 def build_facets(
     base_url: str,
     query: str,
@@ -413,7 +411,6 @@ class OpenLibraryDataProvider(DataProvider):
             if mode == 'buyable':
                 # Keep only records that have a non-free provider
                 records = [r for r in records if _has_buyable_provider(r)]
-
             # Sort available books before unavailable, preserving order within each group
             records.sort(key=lambda r: (0 if _is_currently_available(r) else 1))
 
