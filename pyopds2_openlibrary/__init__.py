@@ -70,11 +70,12 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
     def links(self) -> List[Link]:
         edition = self.editions.docs[0] if self.editions and self.editions.docs else None
         book = edition or self
+        opds_base = OpenLibraryDataProvider.OPDS_BASE_URL or f"{OpenLibraryDataProvider.BASE_URL}/opds"
 
         links: list[Link] = [
             Link(
                 rel="self",
-                href=f"{OpenLibraryDataProvider.BASE_URL}/opds{book.key}",
+                href=f"{opds_base}{book.key}",
                 type="application/opds-publication+json",
             ),
             Link(
@@ -211,7 +212,7 @@ def fetch_languages_map() -> dict[str, str]:
     Get a map of MARC language codes (as saved in Open Library search results)
     to iso_639_1 language names.
     """
-    r = requests.get("http://openlibrary.org/query.json?type=/type/language&key&identifiers&limit=1000")
+    r = requests.get("https://openlibrary.org/query.json?type=/type/language&key&identifiers&limit=1000")
     r.raise_for_status()
     data = cast(List[OpenLibraryLanguageStub], r.json())
     languages = {}
@@ -253,6 +254,7 @@ def _is_currently_available(record: OpenLibraryDataRecord) -> bool:
 class OpenLibraryDataProvider(DataProvider):
     """Data provider for Open Library records."""
     BASE_URL: str = "https://openlibrary.org"
+    OPDS_BASE_URL: Optional[str] = None
     TITLE: str = "OpenLibrary.org OPDS Service"
     SEARCH_URL: str = "/opds/search{?query}"
 
