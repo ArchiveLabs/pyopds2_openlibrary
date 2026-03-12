@@ -70,12 +70,12 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
     def links(self) -> List[Link]:
         edition = self.editions.docs[0] if self.editions and self.editions.docs else None
         book = edition or self
-        key = book.key or self.key or ""
+        opds_base = OpenLibraryDataProvider.OPDS_BASE_URL or f"{OpenLibraryDataProvider.BASE_URL}/opds"
 
         links: list[Link] = [
             Link(
                 rel="self",
-                href=f"{OpenLibraryDataProvider.BASE_URL}/opds{key}",
+                href=f"{opds_base}{book.key}",
                 type="application/opds-publication+json",
             ),
             Link(
@@ -165,9 +165,12 @@ def ol_acquisition_to_opds_acquisition_link(
         link.properties["availability"] = "unavailable"
         if edition.ebook_access == "public":
             link.properties["availability"] = "available"
-    if edition.availability and 'borrow' in edition.availability.status:
-        # This will need to be expanded once Lenny is an option for borrowing
-        link.properties["availability"] = edition.availability.status.replace("borrow_", "")
+    if edition.availability:
+        status = edition.availability.status
+        if status == "open" or status == "borrow_available":
+            link.properties["availability"] = "available"
+        elif status == "private" or status == "error" or status == "borrow_unavailable":
+            link.properties["availability"] = "unavailable"
 
     if acq.provider_name == "ia":
         if edition.ia:
@@ -217,7 +220,7 @@ def fetch_languages_map() -> dict[str, str]:
     Get a map of MARC language codes (as saved in Open Library search results)
     to iso_639_1 language names.
     """
-    r = requests.get("http://openlibrary.org/query.json?type=/type/language&key&identifiers&limit=1000")
+    r = requests.get("https://openlibrary.org/query.json?type=/type/language&key&identifiers&limit=1000")
     r.raise_for_status()
     data = cast(List[OpenLibraryLanguageStub], r.json())
     languages = {}
@@ -232,9 +235,34 @@ def fetch_languages_map() -> dict[str, str]:
     return languages
 
 
+def _has_acquisition_options(record: OpenLibraryDataRecord) -> bool:
+    """Check if a record's edition has any acquisition options (providers).
+
+    Books without providers have no way for the user to interact with them
+    (no borrow, no sample, no download) and should be hidden from results.
+    """
+    edition = record.editions.docs[0] if record.editions and record.editions.docs else None
+    if not edition:
+        return False
+    return bool(edition.providers)
+
+
+def _is_currently_available(record: OpenLibraryDataRecord) -> bool:
+    """Check if a record's edition is currently available (not checked out)."""
+    edition = record.editions.docs[0] if record.editions and record.editions.docs else None
+    if not edition:
+        return False
+    if edition.ebook_access == "public":
+        return True
+    if edition.availability and edition.availability.status == "borrow_unavailable":
+        return False
+    return True
+
+
 class OpenLibraryDataProvider(DataProvider):
     """Data provider for Open Library records."""
     BASE_URL: str = "https://openlibrary.org"
+    OPDS_BASE_URL: Optional[str] = None
     TITLE: str = "OpenLibrary.org OPDS Service"
     SEARCH_URL: str = "/opds/search{?query}"
 
@@ -272,8 +300,8 @@ class OpenLibraryDataProvider(DataProvider):
             offset: Number of results to skip.
             sort: Sort order for results.
             facets: Optional facets to apply. Supported facets:
-                - 'mode': 'ebooks' (default) filters to borrowable items,
-                          'everything' returns all results.
+                - 'mode': 'everything' (default) returns all results,
+                          'ebooks' filters to currently available ebook items.
         """
         fields = [
             "key", "title", "editions", "description", "providers", "author_name", "ia",
@@ -282,11 +310,13 @@ class OpenLibraryDataProvider(DataProvider):
         ]
 
         internal_query = query
-        facets = facets or {}
-        mode = facets.get('mode', 'ebooks')
+        if facets:
+            mode = facets.get('mode', 'everything')
+        else:
+            mode = 'everything'
 
         if mode == 'ebooks' and 'ebook_access:' not in internal_query:
-            internal_query = f"{internal_query} ebook_access:[borrowable TO *]"
+            internal_query = f"{internal_query} ebook_access:[printdisabled TO *]"
 
         params = {
             "editions": "true",
@@ -307,6 +337,13 @@ class OpenLibraryDataProvider(DataProvider):
                 doc = dict(doc)
                 doc["editions"] = OpenLibraryDataRecord.EditionsResultSet.model_validate(doc["editions"])
             records.append(OpenLibraryDataRecord.model_validate(doc))
+
+        if mode == 'ebooks':
+            # Hide books with no acquisition options (issue #23)
+            records = [r for r in records if _has_acquisition_options(r)]
+            # Sort available books before unavailable, preserving order within each group
+            records.sort(key=lambda r: (0 if _is_currently_available(r) else 1))
+
         return DataProvider.SearchResponse(
             provider=OpenLibraryDataProvider,
             records=records,
