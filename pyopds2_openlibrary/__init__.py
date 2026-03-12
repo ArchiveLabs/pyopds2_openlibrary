@@ -70,6 +70,7 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
     def links(self) -> List[Link]:
         edition = self.editions.docs[0] if self.editions and self.editions.docs else None
         book = edition or self
+        key = book.key or self.key or ""
         opds_base = OpenLibraryDataProvider.OPDS_BASE_URL or f"{OpenLibraryDataProvider.BASE_URL}/opds"
 
         links: list[Link] = [
