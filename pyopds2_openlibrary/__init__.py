@@ -1,6 +1,7 @@
 import functools
 import typing
 from typing_extensions import Literal
+from urllib.parse import urlencode
 import requests
 from typing import List, Optional, TypedDict, cast
 from pydantic import BaseModel, Field
@@ -12,6 +13,7 @@ from pyopds2 import (
     Metadata,
     Link
 )
+
 
 
 class BookSharedDoc(BaseModel):
@@ -110,7 +112,7 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
     def metadata(self) -> Metadata:
         """Return this record as OPDS Metadata."""
         def get_authors() -> Optional[List[Contributor]]:
-            if self.author_name:
+            if self.author_name and self.author_key:
                 return [
                     Contributor(
                         name=name,
@@ -168,7 +170,7 @@ def ol_acquisition_to_opds_acquisition_link(
         elif status == "private" or status == "error" or status == "borrow_unavailable":
             link.properties["availability"] = "unavailable"
 
-    if acq.provider_name == "ia":
+    if acq.provider_name == "ia" and edition.ia:
         link.properties['more'] = {
             "href": f"https://archive.org/services/loans/loan/?action=webpub&identifier={edition.ia[0]}&opds=1",
             "rel": "http://opds-spec.org/acquisition/",
@@ -251,6 +253,76 @@ def _is_currently_available(record: OpenLibraryDataRecord) -> bool:
     return True
 
 
+def build_facets(
+    base_url: str,
+    query: str,
+    sort: Optional[str] = None,
+    mode: str = "everything",
+) -> list[dict]:
+    """Build OPDS 2.0 facets for sort and availability filtering."""
+
+    def href(sort_val: Optional[str] = sort, mode_val: str = mode) -> str:
+        params: dict[str, str] = {"query": query}
+        if sort_val:
+            params["sort"] = sort_val
+        if mode_val and mode_val != "everything":
+            params["mode"] = mode_val
+        return f"{base_url}/search?{urlencode(params)}"
+
+    def facet_link(
+        title: str,
+        active: bool,
+        rel: Optional[str] = None,
+        sort_val: Optional[str] = sort,
+        mode_val: str = mode,
+    ) -> dict:
+        link: dict = {
+            "type": "application/opds+json",
+            "title": title,
+            "href": href(sort_val=sort_val, mode_val=mode_val),
+        }
+        if active:
+            link["rel"] = "self"
+        elif rel:
+            link["rel"] = rel
+        return link
+
+    active_sort = sort or ""
+
+    return [
+        {
+            "metadata": {"title": "Sort"},
+            "links": [
+                facet_link("Trending", active_sort == "trending",
+                           rel="http://opds-spec.org/sort/popular", sort_val="trending"),
+                facet_link("Most Recent", active_sort == "new",
+                           rel="http://opds-spec.org/sort/new", sort_val="new"),
+                facet_link("Relevance", active_sort == "", sort_val=""),
+            ],
+        },
+        {
+            "metadata": {"title": "Availability"},
+            "links": [
+                facet_link("All", mode == "everything", mode_val="everything"),
+                facet_link("Available to Borrow", mode == "ebooks", mode_val="ebooks"),
+                facet_link("Open Access", mode == "open_access", mode_val="open_access"),
+                facet_link("Buyable", mode == "buyable", mode_val="buyable"),
+            ],
+        },
+    ]
+
+
+def _has_buyable_provider(record: OpenLibraryDataRecord) -> bool:
+    """Check if a record has at least one provider with a non-zero price."""
+    edition = record.editions.docs[0] if record.editions and record.editions.docs else None
+    if not edition or not edition.providers:
+        return False
+    return any(
+        p.price and not p.price.startswith("0")
+        for p in edition.providers
+    )
+
+
 class OpenLibraryDataProvider(DataProvider):
     """Data provider for Open Library records."""
     BASE_URL: str = "https://openlibrary.org"
@@ -309,6 +381,10 @@ class OpenLibraryDataProvider(DataProvider):
 
         if mode == 'ebooks' and 'ebook_access:' not in internal_query:
             internal_query = f"{internal_query} ebook_access:[printdisabled TO *]"
+        elif mode == 'open_access' and 'ebook_access:' not in internal_query:
+            internal_query = f"{internal_query} ebook_access:public"
+        elif mode == 'buyable':
+            internal_query = f"{internal_query} ebook_access:[printdisabled TO *]"
 
         params = {
             "editions": "true",
@@ -330,9 +406,14 @@ class OpenLibraryDataProvider(DataProvider):
                 doc["editions"] = OpenLibraryDataRecord.EditionsResultSet.model_validate(doc["editions"])
             records.append(OpenLibraryDataRecord.model_validate(doc))
 
-        if mode == 'ebooks':
+        if mode in ('ebooks', 'open_access', 'buyable'):
             # Hide books with no acquisition options (issue #23)
             records = [r for r in records if _has_acquisition_options(r)]
+
+            if mode == 'buyable':
+                # Keep only records that have a non-free provider
+                records = [r for r in records if _has_buyable_provider(r)]
+
             # Sort available books before unavailable, preserving order within each group
             records.sort(key=lambda r: (0 if _is_currently_available(r) else 1))
 
