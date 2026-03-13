@@ -179,6 +179,103 @@ class TestOpenLibraryDataRecord:
         assert len(self_links) == 1
         assert "opds" in self_links[0].href
 
+    def test_record_metadata_falls_back_when_title_missing(self):
+        """Metadata title should be resilient when edition or work title is missing."""
+        record = OpenLibraryDataRecord(
+            key="/works/OL45804W",
+            title="Work Title",
+            editions=OpenLibraryDataRecord.EditionsResultSet(
+                docs=[
+                    OpenLibraryDataRecord.EditionDoc(
+                        key="/books/OL123M",
+                        title=None,
+                    )
+                ]
+            )
+        )
+
+        metadata = record.metadata()
+        assert metadata.title == "Work Title"
+
+        untitled_record = OpenLibraryDataRecord(
+            key="/works/OL00000W",
+            title=None,
+        )
+
+        untitled_metadata = untitled_record.metadata()
+        assert untitled_metadata.title == "Untitled"
+
+    def test_record_metadata_with_author_name_only(self):
+        """Metadata should not fail when author_name exists without author_key."""
+        record = OpenLibraryDataRecord(
+            key="/works/OL45804W",
+            title="Test Book",
+            author_name=["Author Without Key"],
+            author_key=None,
+        )
+
+        metadata = record.metadata()
+        assert metadata.author is not None
+        assert metadata.author[0].name == "Author Without Key"
+
+    def test_record_links_skips_provider_without_url(self):
+        """Acquisition links should skip providers missing URL instead of failing."""
+        record = OpenLibraryDataRecord(
+            key="/works/OL45804W",
+            title="Test Book",
+            editions=OpenLibraryDataRecord.EditionsResultSet(
+                docs=[
+                    OpenLibraryDataRecord.EditionDoc(
+                        key="/books/OL123M",
+                        title="Test Book",
+                        providers=[
+                            OpenLibraryDataRecord.EditionProvider(
+                                provider_name="ia",
+                                access="borrow",
+                                format="web",
+                                url=None,
+                            )
+                        ],
+                    )
+                ]
+            ),
+        )
+
+        links = record.links()
+        acquisition_links = [link for link in links if '/acquisition/' in link.rel]
+        assert len(acquisition_links) == 0
+
+    def test_record_links_handles_malformed_price_and_missing_ia(self):
+        """Acquisition mapping should tolerate malformed price and absent IA ids."""
+        record = OpenLibraryDataRecord(
+            key="/works/OL45804W",
+            title="Test Book",
+            editions=OpenLibraryDataRecord.EditionsResultSet(
+                docs=[
+                    OpenLibraryDataRecord.EditionDoc(
+                        key="/books/OL123M",
+                        title="Test Book",
+                        ia=None,
+                        providers=[
+                            OpenLibraryDataRecord.EditionProvider(
+                                provider_name="ia",
+                                access="borrow",
+                                format="web",
+                                url="https://archive.org/details/example",
+                                price="not-a-price",
+                            )
+                        ],
+                    )
+                ]
+            ),
+        )
+
+        links = record.links()
+        acquisition_links = [link for link in links if '/acquisition/' in link.rel]
+        assert len(acquisition_links) == 1
+        assert 'price' not in (acquisition_links[0].properties or {})
+        assert 'more' not in (acquisition_links[0].properties or {})
+
     def test_record_images(self):
         """Test image link generation from a record."""
         # Record with cover
