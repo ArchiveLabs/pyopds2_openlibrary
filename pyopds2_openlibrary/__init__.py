@@ -14,6 +14,8 @@ from pyopds2 import (
     Link
 )
 
+
+
 class BookSharedDoc(BaseModel):
     """Fields shared between OpenLibrary works and editions."""
     key: Optional[str] = None
@@ -70,7 +72,6 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
     def links(self) -> List[Link]:
         edition = self.editions.docs[0] if self.editions and self.editions.docs else None
         book = edition or self
-        key = book.key or self.key or ""
         opds_base = OpenLibraryDataProvider.OPDS_BASE_URL or f"{OpenLibraryDataProvider.BASE_URL}/opds"
 
         links: list[Link] = [
@@ -81,12 +82,12 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
             ),
             Link(
                 rel="alternate",
-                href=f"{OpenLibraryDataProvider.BASE_URL}{key}",
+                href=f"{OpenLibraryDataProvider.BASE_URL}{book.key}",
                 type="text/html",
             ),
             Link(
                 rel="alternate",
-                href=f"{OpenLibraryDataProvider.BASE_URL}{key}.json",
+                href=f"{OpenLibraryDataProvider.BASE_URL}{book.key}.json",
                 type="application/json",
             ),
         ]
@@ -112,9 +113,7 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
     def metadata(self) -> Metadata:
         """Return this record as OPDS Metadata."""
         def get_authors() -> Optional[List[Contributor]]:
-            if self.author_name:
-                if not self.author_key:
-                    return [Contributor(name=name) for name in self.author_name]
+            if self.author_name and self.author_key:
                 return [
                     Contributor(
                         name=name,
@@ -128,14 +127,15 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
                     )
                     for name, key in zip(self.author_name, self.author_key)
                 ]
+            if self.author_name:
+                return [Contributor(name=name) for name in self.author_name]
 
         edition = self.editions.docs[0] if self.editions and self.editions.docs else None
         book = edition or self
-        title = book.title or self.title or "Untitled"
 
         return Metadata(
             type=self.type,
-            title=title,
+            title=book.title or self.title or "Untitled",
             subtitle=book.subtitle,
             author=get_authors(),
             description=book.description or self.description,
@@ -154,6 +154,10 @@ def ol_acquisition_to_opds_acquisition_link(
     edition: OpenLibraryDataRecord.EditionDoc,
     acq: OpenLibraryDataRecord.EditionProvider
 ) -> Link:
+    # Caller should filter invalid providers, but guard here for robustness.
+    if not acq.url:
+        raise ValueError("Provider URL is required for acquisition links")
+
     link = Link(
         href=acq.url,
         rel=f'http://opds-spec.org/acquisition/{acq.access}',
@@ -173,25 +177,24 @@ def ol_acquisition_to_opds_acquisition_link(
         elif status == "private" or status == "error" or status == "borrow_unavailable":
             link.properties["availability"] = "unavailable"
 
-    if acq.provider_name == "ia":
-        if edition.ia:
-            link.properties['more'] = {
-                "href": f"https://archive.org/services/loans/loan/?action=webpub&identifier={edition.ia[0]}&opds=1",
-                "rel": "http://opds-spec.org/acquisition/",
-                "type": "application/opds-publication+json"
-            }
+    if acq.provider_name == "ia" and edition.ia:
+        link.properties['more'] = {
+            "href": f"https://archive.org/services/loans/loan/?action=webpub&identifier={edition.ia[0]}&opds=1",
+            "rel": "http://opds-spec.org/acquisition/",
+            "type": "application/opds-publication+json"
+        }
     elif acq.provider_name:
         link.title = acq.provider_name
 
     if acq.price:
-        try:
-            amount, currency = acq.price.split(" ", 1)
+        amount = _parse_price_amount(acq.price)
+        price_parts = acq.price.split(maxsplit=1)
+        currency = price_parts[1] if len(price_parts) > 1 else None
+        if amount is not None and currency:
             link.properties["price"] = {
-                "value": float(amount),
+                "value": amount,
                 "currency": currency,
             }
-        except (ValueError, TypeError):
-            pass
 
     return link
 
