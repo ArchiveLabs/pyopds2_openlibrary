@@ -70,6 +70,7 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
     def links(self) -> List[Link]:
         edition = self.editions.docs[0] if self.editions and self.editions.docs else None
         book = edition or self
+        key = book.key or self.key or ""
         opds_base = OpenLibraryDataProvider.OPDS_BASE_URL or f"{OpenLibraryDataProvider.BASE_URL}/opds"
 
         links: list[Link] = [
@@ -80,12 +81,12 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
             ),
             Link(
                 rel="alternate",
-                href=f"{OpenLibraryDataProvider.BASE_URL}{book.key}",
+                href=f"{OpenLibraryDataProvider.BASE_URL}{key}",
                 type="text/html",
             ),
             Link(
                 rel="alternate",
-                href=f"{OpenLibraryDataProvider.BASE_URL}{book.key}.json",
+                href=f"{OpenLibraryDataProvider.BASE_URL}{key}.json",
                 type="application/json",
             ),
         ]
@@ -96,6 +97,7 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
         return links + [
             ol_acquisition_to_opds_acquisition_link(edition, acquisition)
             for acquisition in edition.providers
+            if acquisition.url
         ]
 
     def images(self) -> Optional[List[Link]]:
@@ -110,7 +112,9 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
     def metadata(self) -> Metadata:
         """Return this record as OPDS Metadata."""
         def get_authors() -> Optional[List[Contributor]]:
-            if self.author_name and self.author_key:
+            if self.author_name:
+                if not self.author_key:
+                    return [Contributor(name=name) for name in self.author_name]
                 return [
                     Contributor(
                         name=name,
@@ -127,10 +131,11 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
 
         edition = self.editions.docs[0] if self.editions and self.editions.docs else None
         book = edition or self
+        title = book.title or self.title or "Untitled"
 
         return Metadata(
             type=self.type,
-            title=book.title,
+            title=title,
             subtitle=book.subtitle,
             author=get_authors(),
             description=book.description or self.description,
@@ -168,21 +173,25 @@ def ol_acquisition_to_opds_acquisition_link(
         elif status == "private" or status == "error" or status == "borrow_unavailable":
             link.properties["availability"] = "unavailable"
 
-    if acq.provider_name == "ia" and edition.ia:
-        link.properties['more'] = {
-            "href": f"https://archive.org/services/loans/loan/?action=webpub&identifier={edition.ia[0]}&opds=1",
-            "rel": "http://opds-spec.org/acquisition/",
-            "type": "application/opds-publication+json"
-        }
+    if acq.provider_name == "ia":
+        if edition.ia:
+            link.properties['more'] = {
+                "href": f"https://archive.org/services/loans/loan/?action=webpub&identifier={edition.ia[0]}&opds=1",
+                "rel": "http://opds-spec.org/acquisition/",
+                "type": "application/opds-publication+json"
+            }
     elif acq.provider_name:
         link.title = acq.provider_name
 
     if acq.price:
-        amount, currency = acq.price.split(" ")
-        link.properties["price"] = {
-            "value": float(amount),
-            "currency": currency,
-        }        
+        try:
+            amount, currency = acq.price.split(" ", 1)
+            link.properties["price"] = {
+                "value": float(amount),
+                "currency": currency,
+            }
+        except (ValueError, TypeError):
+            pass
 
     return link
 
