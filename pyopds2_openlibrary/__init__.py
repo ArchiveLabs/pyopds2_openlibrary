@@ -3,6 +3,8 @@ import typing
 from typing_extensions import Literal
 from urllib.parse import urlencode
 import requests
+
+_REQUEST_TIMEOUT: float = 30.0
 from typing import List, Optional, TypedDict, cast
 from pydantic import BaseModel, Field
 
@@ -160,7 +162,7 @@ def ol_acquisition_to_opds_acquisition_link(
 
     link = Link(
         href=acq.url,
-        rel=f'http://opds-spec.org/acquisition/{acq.access}',
+        rel=f'http://opds-spec.org/acquisition/{acq.access}' if acq.access else 'http://opds-spec.org/acquisition',
         type=map_ol_format_to_mime(acq.format) if acq.format else None,
         properties={}
     )
@@ -224,7 +226,7 @@ def fetch_languages_map() -> dict[str, str]:
     Get a map of MARC language codes (as saved in Open Library search results)
     to iso_639_1 language names.
     """
-    r = requests.get("https://openlibrary.org/query.json?type=/type/language&key&identifiers&limit=1000")
+    r = requests.get("https://openlibrary.org/query.json?type=/type/language&key&identifiers&limit=1000", timeout=_REQUEST_TIMEOUT)
     r.raise_for_status()
     data = cast(List[OpenLibraryLanguageStub], r.json())
     languages = {}
@@ -246,9 +248,9 @@ def _has_acquisition_options(record: OpenLibraryDataRecord) -> bool:
     (no borrow, no sample, no download) and should be hidden from results.
     """
     edition = record.editions.docs[0] if record.editions and record.editions.docs else None
-    if not edition:
+    if not edition or not edition.providers:
         return False
-    return bool(edition.providers)
+    return any(p.url for p in edition.providers)
 
 
 def _is_currently_available(record: OpenLibraryDataRecord) -> bool:
@@ -314,6 +316,72 @@ def _has_buyable_provider(record: OpenLibraryDataRecord) -> bool:
     return False
 
 
+_EBOOK_ACCESS_RANK = {
+    "public": 3,
+    "borrowable": 2,
+    "printdisabled": 1,
+    "no_ebook": 0,
+}
+
+
+def _ebook_access_rank(ebook_access: Optional[str]) -> int:
+    """Return a numeric rank for an ebook_access value (higher = more accessible)."""
+    return _EBOOK_ACCESS_RANK.get(ebook_access or "no_ebook", 0)
+
+
+def _resolve_preferred_edition(
+    work_key: str,
+    language: str,
+    edition_fields: list[str],
+) -> Optional["OpenLibraryDataRecord.EditionDoc"]:
+    """Find a full EditionDoc for *work_key* in the preferred MARC language code.
+
+    Makes up to two requests:
+    1. Work editions endpoint to find an edition key matching *language*.
+    2. Search endpoint to get the full edition data (providers, availability, etc.).
+
+    Returns ``None`` if no matching edition is found or any request fails.
+    """
+    try:
+        r = requests.get(
+            f"{OpenLibraryDataProvider.BASE_URL}{work_key}/editions.json",
+            params={"limit": 50, "fields": "key,languages"},
+            timeout=_REQUEST_TIMEOUT,
+        )
+        r.raise_for_status()
+        preferred_olid: Optional[str] = None
+        for entry in r.json().get("entries", []):
+            langs = [lang["key"].split("/")[-1] for lang in entry.get("languages", [])]
+            if language in langs:
+                # entry["key"] is like "/books/OL27945116M"
+                preferred_olid = entry["key"].split("/")[-1]
+                break
+
+        if not preferred_olid:
+            return None
+
+        r2 = requests.get(
+            f"{OpenLibraryDataProvider.BASE_URL}/search.json",
+            params={
+                "q": f"edition_key:{preferred_olid}",
+                "editions": "true",
+                "fields": "editions," + ",".join(edition_fields),
+                "limit": 1,
+            },
+            timeout=_REQUEST_TIMEOUT,
+        )
+        r2.raise_for_status()
+        docs = r2.json().get("docs", [])
+        if not docs:
+            return None
+        edition_docs = docs[0].get("editions", {}).get("docs", [])
+        if not edition_docs:
+            return None
+        return OpenLibraryDataRecord.EditionDoc.model_validate(edition_docs[0])
+    except Exception:
+        return None
+
+
 class OpenLibraryDataProvider(DataProvider):
     """Data provider for Open Library records."""
     BASE_URL: str = "https://openlibrary.org"
@@ -358,6 +426,7 @@ class OpenLibraryDataProvider(DataProvider):
         r = requests.get(
             f"{OpenLibraryDataProvider.BASE_URL}/search.json",
             params={"q": internal_query, "limit": 0, "fields": "key"},
+            timeout=_REQUEST_TIMEOUT,
         )
         r.raise_for_status()
         return r.json().get("numFound", 0)
@@ -470,6 +539,7 @@ class OpenLibraryDataProvider(DataProvider):
         offset: int = 0,
         sort: Optional[str] = None,
         facets: Optional[dict[str, str]] = None,
+        language: str = "eng",
     ) -> DataProvider.SearchResponse:
         """
         Search Open Library.
@@ -493,6 +563,9 @@ class OpenLibraryDataProvider(DataProvider):
                       (``ebook_access:[printdisabled TO *]``), then hide
                       records without acquisition options and keep only
                       those that have at least one non-free provider.
+            language: MARC language code for the preferred edition language.
+                Defaults to ``"eng"`` (English). When multiple editions are
+                available, editions matching this language are sorted first.
         """
         fields = [
             "key", "title", "editions", "description", "providers", "author_name", "ia",
@@ -520,8 +593,11 @@ class OpenLibraryDataProvider(DataProvider):
             "limit": limit,
             **({'sort': sort} if sort else {}),
             "fields": ",".join(fields),
+            # Ask OL to prefer editions in the requested language.
+            # This works for general queries but is ignored when edition_key: is present.
+            **({'lang': language} if language else {}),
         }
-        r = requests.get(f"{OpenLibraryDataProvider.BASE_URL}/search.json", params=params)
+        r = requests.get(f"{OpenLibraryDataProvider.BASE_URL}/search.json", params=params, timeout=_REQUEST_TIMEOUT)
         r.raise_for_status()
         data = r.json()
         docs = data.get("docs", [])
@@ -535,16 +611,53 @@ class OpenLibraryDataProvider(DataProvider):
 
         total = data.get("numFound", 0)
 
+        # When the query targets a specific edition (edition_key:), OL ignores the
+        # lang param and always returns that edition.  If its language doesn't match
+        # the preference, resolve the correct edition from the work.
+        if language and "edition_key:" in query:
+            edition_fields = [
+                "key", "title", "subtitle", "description", "cover_i",
+                "ebook_access", "language", "ia", "availability", "providers",
+            ]
+            for record in records:
+                if record.editions and record.editions.docs:
+                    ed = record.editions.docs[0]
+                    if not ed.language or language not in ed.language:
+                        preferred = _resolve_preferred_edition(
+                            record.key or "", language, edition_fields
+                        )
+                        # Only substitute if the preferred edition has at least
+                        # as much ebook access as the original, so we never
+                        # silently remove a borrow/read link that was working.
+                        if preferred and _ebook_access_rank(preferred.ebook_access) >= _ebook_access_rank(ed.ebook_access):
+                            record.editions.docs[0] = preferred
+
+        # When OL returns multiple editions, move language-matching ones first
+        # (fallback for cases where lang param alone isn't sufficient).
+        if language:
+            for record in records:
+                if record.editions and record.editions.docs and len(record.editions.docs) > 1:
+                    matched = [d for d in record.editions.docs if d.language and language in d.language]
+                    others = [d for d in record.editions.docs if not (d.language and language in d.language)]
+                    if matched:
+                        record.editions.docs = matched + others
+
+        # Always filter out records with no acquisition options (issue #36).
+        # An OPDS feed is for book acquisition; without providers there is nothing
+        # the user can do with the entry. This also covers carousels that use
+        # mode='everything' and previously received no filtering.
+        records = [r for r in records if _has_acquisition_options(r)]
+
         if mode in ('ebooks', 'open_access', 'buyable'):
-            # Hide books with no acquisition options (issue #23)
-            records = [r for r in records if _has_acquisition_options(r)]
 
             if mode == 'buyable':
                 # Keep only records that have a non-free provider.
                 # This is a client-side filter (Solr has no buyable field),
                 # so total must reflect the filtered count.
                 records = [r for r in records if _has_buyable_provider(r)]
-                total = len(records)
+                # Buyable is filtered client-side; Solr cannot count it accurately,
+                # so we signal an unknown total rather than a misleading per-page count.
+                total = None
 
             # Sort available books before unavailable, preserving order within each group
             records.sort(key=lambda r: (0 if _is_currently_available(r) else 1))
