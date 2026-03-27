@@ -97,11 +97,10 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
         if not edition or not edition.providers:
             return links
 
-        return links + [
-            ol_acquisition_to_opds_acquisition_link(edition, acquisition)
-            for acquisition in edition.providers
-            if acquisition.url
-        ]
+        for acquisition in edition.providers:
+            if acquisition.url:
+                links.extend(ol_acquisition_to_opds_links(edition, acquisition))
+        return links
 
     def images(self) -> Optional[List[Link]]:
         edition = self.editions.docs[0] if self.editions and self.editions.docs else None
@@ -152,14 +151,32 @@ class OpenLibraryLanguageStub(TypedDict):
     identifiers: dict[str, list[str]] | None
 
 
-def ol_acquisition_to_opds_acquisition_link(
-    edition: OpenLibraryDataRecord.EditionDoc,
-    acq: OpenLibraryDataRecord.EditionProvider
-) -> Link:
-    # Caller should filter invalid providers, but guard here for robustness.
-    if not acq.url:
-        raise ValueError("Provider URL is required for acquisition links")
+def _build_ia_alternate_link(edition: OpenLibraryDataRecord.EditionDoc) -> Link:
+    """Build an alternate link for an Internet Archive provider.
 
+    Instead of an acquisition link pointing to the IA details page, we produce
+    a single ``rel=alternate`` link whose href is the webpub manifest endpoint.
+    An ``authenticate`` property tells the client where to obtain credentials.
+    """
+    identifier = edition.ia[0]
+    return Link(
+        href=f"https://archive.org/services/loans/loan/?action=webpub&identifier={identifier}&opds=1",
+        rel="alternate",
+        type="application/opds-publication+json",
+        properties={
+            "authenticate": {
+                "href": "https://archive.org/services/loans/loan/?action=authentication_document",
+                "type": "application/opds-authentication+json",
+            }
+        },
+    )
+
+
+def _build_external_acquisition_link(
+    edition: OpenLibraryDataRecord.EditionDoc,
+    acq: OpenLibraryDataRecord.EditionProvider,
+) -> Link:
+    """Build an acquisition link for a non-IA provider (e.g. Standard Ebooks)."""
     link = Link(
         href=acq.url,
         rel=f'http://opds-spec.org/acquisition/{acq.access}' if acq.access else 'http://opds-spec.org/acquisition',
@@ -168,7 +185,6 @@ def ol_acquisition_to_opds_acquisition_link(
     )
 
     if edition.ebook_access:
-        # Default availability to `unavailable`
         link.properties["availability"] = "unavailable"
         if edition.ebook_access == "public":
             link.properties["availability"] = "available"
@@ -179,13 +195,7 @@ def ol_acquisition_to_opds_acquisition_link(
         elif status == "private" or status == "error" or status == "borrow_unavailable":
             link.properties["availability"] = "unavailable"
 
-    if acq.provider_name == "ia" and edition.ia:
-        link.properties['more'] = {
-            "href": f"https://archive.org/services/loans/loan/?action=webpub&identifier={edition.ia[0]}&opds=1",
-            "rel": "http://opds-spec.org/acquisition/",
-            "type": "application/opds-publication+json"
-        }
-    elif acq.provider_name:
+    if acq.provider_name:
         link.title = acq.provider_name
 
     if acq.price:
@@ -199,6 +209,25 @@ def ol_acquisition_to_opds_acquisition_link(
             }
 
     return link
+
+
+def ol_acquisition_to_opds_links(
+    edition: OpenLibraryDataRecord.EditionDoc,
+    acq: OpenLibraryDataRecord.EditionProvider,
+) -> List[Link]:
+    """Convert an OL provider into one or more OPDS links.
+
+    For IA providers this replaces the acquisition link with a single
+    ``rel=alternate`` webpub manifest link (per issue #50).
+    For all other providers a standard acquisition link is returned.
+    """
+    if not acq.url:
+        raise ValueError("Provider URL is required for acquisition links")
+
+    if acq.provider_name == "ia" and edition.ia:
+        return [_build_ia_alternate_link(edition)]
+
+    return [_build_external_acquisition_link(edition, acq)]
 
 
 def map_ol_format_to_mime(ol_format: Literal['web', 'pdf', 'epub', 'audio']) -> Optional[str]:
@@ -327,18 +356,26 @@ def _ebook_access_rank(ebook_access: Optional[str]) -> int:
     return _EBOOK_ACCESS_RANK.get(ebook_access or "no_ebook", 0)
 
 
+class _ResolvedEdition(typing.NamedTuple):
+    """Result of _resolve_preferred_edition."""
+    edition: "OpenLibraryDataRecord.EditionDoc"
+    author_name: Optional[list[str]]
+    author_key: Optional[list[str]]
+
+
 def _resolve_preferred_edition(
     work_key: str,
     language: str,
     edition_fields: list[str],
-) -> Optional["OpenLibraryDataRecord.EditionDoc"]:
+) -> Optional["_ResolvedEdition"]:
     """Find a full EditionDoc for *work_key* in the preferred MARC language code.
 
     Makes up to two requests:
     1. Work editions endpoint to find an edition key matching *language*.
     2. Search endpoint to get the full edition data (providers, availability, etc.).
 
-    Returns ``None`` if no matching edition is found or any request fails.
+    Returns a ``_ResolvedEdition`` namedtuple (edition + author data) or
+    ``None`` if no matching edition is found or any request fails.
     """
     try:
         r = requests.get(
@@ -358,12 +395,14 @@ def _resolve_preferred_edition(
         if not preferred_olid:
             return None
 
+        # Include author fields so we can fix author name for the preferred edition.
+        search_fields = "editions,author_name,author_key," + ",".join(edition_fields)
         r2 = requests.get(
             f"{OpenLibraryDataProvider.BASE_URL}/search.json",
             params={
                 "q": f"edition_key:{preferred_olid}",
                 "editions": "true",
-                "fields": "editions," + ",".join(edition_fields),
+                "fields": search_fields,
                 "limit": 1,
             },
             timeout=_REQUEST_TIMEOUT,
@@ -375,9 +414,68 @@ def _resolve_preferred_edition(
         edition_docs = docs[0].get("editions", {}).get("docs", [])
         if not edition_docs:
             return None
-        return OpenLibraryDataRecord.EditionDoc.model_validate(edition_docs[0])
+        edition = OpenLibraryDataRecord.EditionDoc.model_validate(edition_docs[0])
+        author_name = docs[0].get("author_name") or None
+        author_key = docs[0].get("author_key") or None
+        return _ResolvedEdition(edition=edition, author_name=author_name, author_key=author_key)
     except Exception:
         return None
+
+
+# ---------------------------------------------------------------------------
+# Shared availability-facet primitives
+# ---------------------------------------------------------------------------
+
+# Canonical ordering and labels for availability modes.
+# Each entry: (mode_value, search_page_label, home_page_label)
+_AVAILABILITY_MODES: list[tuple[str, str, str]] = [
+    ("everything",  "All",                "Everything"),
+    ("ebooks",      "Available to Borrow", "Borrowable"),
+    ("open_access", "Open Access",         "Open Access"),
+    ("buyable",     "Buyable",             "Purchasable"),
+]
+
+
+def _build_availability_links(
+    mode: str,
+    href_fn: typing.Callable[[str], str],
+    labels: Optional[dict[str, str]] = None,
+    counts: Optional[dict[str, Optional[int]]] = None,
+    exclude: Optional[set[str]] = None,
+) -> list[dict]:
+    """Build the list of availability facet link dicts (single implementation).
+
+    Each caller supplies its own ``href_fn`` (Open/Closed) so this function
+    never needs to change when a new page type needs availability facets.
+
+    Args:
+        mode: Currently active mode value (e.g. ``"ebooks"``).
+        href_fn: Converts a mode value string to a full URL.
+        labels: ``{mode_value: display_label}`` overrides.  Unspecified modes
+            fall back to the search-page label in ``_AVAILABILITY_MODES``.
+        counts: ``{mode_value: item_count}`` for ``numberOfItems`` (OPDS 2.0 §2.4).
+        exclude: Mode values to omit from the facet list.
+    """
+    default_labels = {val: slabel for val, slabel, _ in _AVAILABILITY_MODES}
+    resolved = {**default_labels, **(labels or {})}
+    counts = counts or {}
+    exclude = exclude or set()
+    links = []
+    for val, _, _ in _AVAILABILITY_MODES:
+        if val in exclude:
+            continue
+        link: dict = {
+            "title": resolved[val],
+            "href": href_fn(val),
+            "type": "application/opds+json",
+        }
+        if val == mode:
+            link["rel"] = "self"
+        count = counts.get(val)
+        if count is not None:
+            link.setdefault("properties", {})["numberOfItems"] = count
+        links.append(link)
+    return links
 
 
 class OpenLibraryDataProvider(DataProvider):
@@ -459,16 +557,16 @@ class OpenLibraryDataProvider(DataProvider):
     ) -> list[dict]:
         """Build OPDS 2.0 facets for sort and availability filtering.
 
-        Args:
-            total: Total number of results for the current search.  Used as
-                   ``numberOfItems`` on every Sort facet link (sorting does not
-                   change the result count).
-            availability_counts: Mapping of mode name to item count.  When
-                   provided, every Availability facet link gets a
-                   ``numberOfItems`` property per OPDS 2.0 §2.4.
-        """
+        Availability links point to ``/search``; for homepage facets use
+        ``build_home_facets``.
 
-        def href(sort_val: Optional[str] = sort, mode_val: str = mode) -> str:
+        Args:
+            total: Total result count; attached to every Sort link as
+                   ``numberOfItems``.
+            availability_counts: ``{mode_value: item_count}`` for
+                   ``numberOfItems`` per OPDS 2.0 §2.4.
+        """
+        def search_href(sort_val: Optional[str] = sort, mode_val: str = "everything") -> str:
             params: dict[str, str] = {"query": query}
             if sort_val:
                 params["sort"] = sort_val
@@ -476,58 +574,74 @@ class OpenLibraryDataProvider(DataProvider):
                 params["mode"] = mode_val
             return f"{base_url}/search?{urlencode(params)}"
 
-        def facet_link(
+        def sort_link(
             title: str,
             active: bool,
-            rel: Optional[str] = None,
-            sort_val: Optional[str] = sort,
-            mode_val: str = mode,
-            number_of_items: Optional[int] = None,
+            rel: Optional[str],
+            sort_val: Optional[str],
         ) -> dict:
             link: dict = {
                 "type": "application/opds+json",
                 "title": title,
-                "href": href(sort_val=sort_val, mode_val=mode_val),
+                "href": search_href(sort_val=sort_val),
             }
             if active:
                 link["rel"] = ["self", rel] if rel else "self"
             elif rel:
                 link["rel"] = rel
-            if number_of_items is not None:
-                link.setdefault("properties", {})["numberOfItems"] = number_of_items
+            if total is not None:
+                link.setdefault("properties", {})["numberOfItems"] = total
             return link
 
         active_sort = sort or ""
-        counts = availability_counts or {}
 
         return [
             {
                 "metadata": {"title": "Sort"},
                 "links": [
-                    facet_link("Trending", active_sort == "trending",
-                               rel="http://opds-spec.org/sort/popular", sort_val="trending",
-                               number_of_items=total),
-                    facet_link("Most Recent", active_sort == "new",
-                               rel="http://opds-spec.org/sort/new", sort_val="new",
-                               number_of_items=total),
-                    facet_link("Relevance", active_sort == "", sort_val="",
-                               number_of_items=total),
+                    sort_link("Trending",    active_sort == "trending",
+                              "http://opds-spec.org/sort/popular", "trending"),
+                    sort_link("Most Recent", active_sort == "new",
+                              "http://opds-spec.org/sort/new",     "new"),
+                    sort_link("Relevance",   active_sort == "",
+                              None,                                ""),
                 ],
             },
             {
                 "metadata": {"title": "Availability"},
-                "links": [
-                    facet_link("All", mode == "everything", mode_val="everything",
-                               number_of_items=counts.get("everything")),
-                    facet_link("Available to Borrow", mode == "ebooks", mode_val="ebooks",
-                               number_of_items=counts.get("ebooks")),
-                    facet_link("Open Access", mode == "open_access", mode_val="open_access",
-                               number_of_items=counts.get("open_access")),
-                    facet_link("Buyable", mode == "buyable", mode_val="buyable",
-                               number_of_items=counts.get("buyable")),
-                ],
+                "links": _build_availability_links(
+                    mode=mode,
+                    href_fn=lambda val: search_href(sort_val=sort, mode_val=val),
+                    counts=availability_counts,
+                ),
             },
         ]
+
+    @staticmethod
+    def build_home_facets(base_url: str, mode: str = "everything") -> list[dict]:
+        """Build the Availability facet group for the OPDS homepage.
+
+        Links point to ``<base_url>/?mode=<value>`` so the filter resets when
+        the user navigates to ``/search``.
+
+        Args:
+            base_url: Base URL of the OPDS service (no trailing slash).
+            mode: Currently active availability mode.
+        """
+        home_labels = {val: hlabel for val, _, hlabel in _AVAILABILITY_MODES}
+
+        def home_href(val: str) -> str:
+            return f"{base_url}/" if val == "everything" else f"{base_url}/?mode={val}"
+
+        return [{
+            "metadata": {"title": "Availability"},
+            "links": _build_availability_links(
+                mode=mode,
+                href_fn=home_href,
+                labels=home_labels,
+                exclude={"buyable"},
+            ),
+        }]
 
     @typing.override
     @staticmethod
@@ -538,6 +652,7 @@ class OpenLibraryDataProvider(DataProvider):
         sort: Optional[str] = None,
         facets: Optional[dict[str, str]] = None,
         language: str = "eng",
+        title: Optional[str] = None,
     ) -> DataProvider.SearchResponse:
         """
         Search Open Library.
@@ -561,10 +676,16 @@ class OpenLibraryDataProvider(DataProvider):
                       (``ebook_access:[printdisabled TO *]``), then hide
                       records without acquisition options and keep only
                       those that have at least one non-free provider.
-            language: MARC language code for the preferred edition language.
-                Defaults to ``"eng"`` (English). When multiple editions are
-                available, editions matching this language are sorted first.
+            language: Reserved for future use. Currently only ``"eng"``
+                (English) is supported; any other value is ignored and
+                English is used instead. Multi-language support will be
+                added via browser-language / facet selection in a future
+                release.
         """
+        # Only English is supported for now. Override any other value so
+        # non-English content is never accidentally displayed.
+        language = "eng"
+
         fields = [
             "key", "title", "editions", "description", "providers", "author_name", "ia",
             "cover_i", "availability", "ebook_access", "author_key", "subtitle", "language",
@@ -624,11 +745,18 @@ class OpenLibraryDataProvider(DataProvider):
                         preferred = _resolve_preferred_edition(
                             record.key or "", language, edition_fields
                         )
-                        # Only substitute if the preferred edition has at least
-                        # as much ebook access as the original, so we never
-                        # silently remove a borrow/read link that was working.
-                        if preferred and _ebook_access_rank(preferred.ebook_access) >= _ebook_access_rank(ed.ebook_access):
-                            record.editions.docs[0] = preferred
+                        # Always prefer the language-matched edition over a foreign-language
+                        # one, even if its ebook-access rank is lower. Language
+                        # correctness takes priority; the user can still follow
+                        # the alternate link to the original edition.
+                        if preferred:
+                            record.editions.docs[0] = preferred.edition
+                            # Fix author name/key if the edition-level search
+                            # returned localised author data.
+                            if preferred.author_name:
+                                record.author_name = preferred.author_name
+                            if preferred.author_key:
+                                record.author_key = preferred.author_key
 
         # When OL returns multiple editions, move language-matching ones first
         # (fallback for cases where lang param alone isn't sufficient).
@@ -653,18 +781,41 @@ class OpenLibraryDataProvider(DataProvider):
                 # This is a client-side filter (Solr has no buyable field),
                 # so total cannot be counted accurately by Solr.
                 records = [r for r in records if _has_buyable_provider(r)]
-                # Buyable is filtered client-side; Solr cannot count it accurately,
-                # so we signal an unknown total rather than a misleading per-page count.
-                total = None
+                # Buyable is filtered client-side; Solr cannot count it
+                # accurately, so fall back to the current page count.
+                total = len(records)
             # Sort available books before unavailable, preserving order within each group
             records.sort(key=lambda r: (0 if _is_currently_available(r) else 1))
 
-        return DataProvider.SearchResponse(
-            provider=OpenLibraryDataProvider,
-            records=records,
-            total=total,
-            query=query,
-            limit=limit,
-            offset=offset,
-            sort=sort
-        )
+        response_kwargs = {
+            "provider": OpenLibraryDataProvider,
+            "records": records,
+            "total": total,
+            "query": query,
+            "limit": limit,
+            "offset": offset,
+            "sort": sort,
+        }
+        # Some pyopds2 versions include title in SearchResponse, some do not.
+        if title is not None and "title" in getattr(DataProvider.SearchResponse, "__dataclass_fields__", {}):
+            response_kwargs["title"] = title
+
+        resp = DataProvider.SearchResponse(**response_kwargs)
+
+        # Backward-compatible fallback for pyopds2 versions that lack title.
+        if title is not None and "title" not in getattr(DataProvider.SearchResponse, "__dataclass_fields__", {}):
+            resp.title = title
+        # Inject title into pagination params so links carry it.
+        # params is a functools.cached_property; setting it on the
+        # instance before first access caches our version.
+        if title:
+            base_params = {
+                **({"query": query} if query else {}),
+                **({"limit": str(limit)} if limit else {}),
+                **({"sort": sort} if sort else {}),
+                "title": title,
+            }
+            if resp.page > 1:
+                base_params["page"] = str(resp.page)
+            resp.params = base_params
+        return resp

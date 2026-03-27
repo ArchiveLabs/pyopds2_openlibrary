@@ -15,7 +15,7 @@ from pyopds2_openlibrary import (
     build_facets,
     fetch_facet_counts,
     fetch_languages_map,
-    ol_acquisition_to_opds_acquisition_link,
+    ol_acquisition_to_opds_links,
 )
 
 
@@ -514,21 +514,21 @@ class TestAcquisitionLinkRelFallback:
         edition = OpenLibraryDataRecord.EditionDoc(key="/books/OL20M", title="Edition")
         acq = OpenLibraryDataRecord.EditionProvider(url="https://example.org/generic", access=None)
 
-        link = ol_acquisition_to_opds_acquisition_link(edition, acq)
+        link = ol_acquisition_to_opds_links(edition, acq)[0]
         assert link.rel == "http://opds-spec.org/acquisition"
 
     def test_access_borrow_uses_borrow_rel(self):
         edition = OpenLibraryDataRecord.EditionDoc(key="/books/OL21M", title="Edition")
         acq = OpenLibraryDataRecord.EditionProvider(url="https://example.org/borrow", access="borrow")
 
-        link = ol_acquisition_to_opds_acquisition_link(edition, acq)
+        link = ol_acquisition_to_opds_links(edition, acq)[0]
         assert link.rel == "http://opds-spec.org/acquisition/borrow"
 
     def test_access_open_access_uses_open_access_rel(self):
         edition = OpenLibraryDataRecord.EditionDoc(key="/books/OL22M", title="Edition")
         acq = OpenLibraryDataRecord.EditionProvider(url="https://example.org/open", access="open-access")
 
-        link = ol_acquisition_to_opds_acquisition_link(edition, acq)
+        link = ol_acquisition_to_opds_links(edition, acq)[0]
         assert link.rel == "http://opds-spec.org/acquisition/open-access"
 
 
@@ -819,7 +819,7 @@ class TestSearchModeHandling:
         self._mock_search_response(mock_get)
 
         result = OpenLibraryDataProvider.search("cats", facets={"mode": "buyable"})
-        assert result.total is None
+        assert result.total == 1
         assert len(result.records) == 1
         assert all(_has_buyable_provider(r) for r in result.records)
 
@@ -1109,14 +1109,14 @@ class TestSearchTotalsByMode:
         ]
 
     @patch("pyopds2_openlibrary.requests.get")
-    def test_mode_buyable_total_is_none(self, mock_get):
+    def test_mode_buyable_total_is_filtered_len(self, mock_get):
         mock_response = MagicMock()
         mock_response.json.return_value = {"numFound": 88, "docs": self._mock_docs_with_buyable_and_non_buyable()}
         mock_response.raise_for_status.return_value = None
         mock_get.return_value = mock_response
 
         result = OpenLibraryDataProvider.search("cats", facets={"mode": "buyable"})
-        assert result.total is None
+        assert result.total == 1
 
     @patch("pyopds2_openlibrary.requests.get")
     def test_mode_ebooks_total_uses_openlibrary_numfound(self, mock_get):
