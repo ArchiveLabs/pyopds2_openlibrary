@@ -157,9 +157,12 @@ def _build_ia_alternate_link(edition: OpenLibraryDataRecord.EditionDoc) -> Link:
     Instead of an acquisition link pointing to the IA details page, we produce
     a single ``rel=alternate`` link whose href is the webpub manifest endpoint.
     An ``authenticate`` property tells the client where to obtain credentials.
+
+    Link schema: https://github.com/readium/webpub-manifest/blob/master/schema/link.schema.json
     """
     identifier = edition.ia[0]
     return Link(
+        title="Internet Archive"
         href=f"https://archive.org/services/loans/loan/?action=webpub&identifier={identifier}&opds=1",
         rel="alternate",
         type="application/opds-publication+json",
