@@ -8,7 +8,7 @@ git clone https://github.com/ArchiveLabs/pyopds2_openlibrary.git
 cd pyopds2_openlibrary
 virtualenv env
 source ./env/bin/activate
-pip install pyopds2 requests
+pip install pyopds2 httpx
 python
 ```
 

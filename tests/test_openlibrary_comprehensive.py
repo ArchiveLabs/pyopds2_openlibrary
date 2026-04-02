@@ -2,9 +2,13 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+from urllib.parse import parse_qs, urlparse
 
+import httpx
 import pytest
 from pyopds2 import DataProvider
+
+import pyopds2_openlibrary as openlibrary
 
 from pyopds2_openlibrary import (
     OpenLibraryDataProvider,
@@ -18,13 +22,14 @@ from pyopds2_openlibrary import (
     _is_currently_available,
     _parse_price_amount,
     _resolve_preferred_edition,
-    build_facets,
-    fetch_facet_counts,
     fetch_languages_map,
     map_ol_format_to_mime,
     marc_language_to_iso_639_1,
     ol_acquisition_to_opds_links,
 )
+
+build_facets = OpenLibraryDataProvider.build_facets
+fetch_facet_counts = OpenLibraryDataProvider.fetch_facet_counts
 
 
 def _provider(**kwargs) -> OpenLibraryDataRecord.EditionProvider:
@@ -53,6 +58,11 @@ def _record_with_edition_providers(*providers: OpenLibraryDataRecord.EditionProv
             ]
         },
     )
+
+
+def _reset_languages_map_cache() -> None:
+    openlibrary._languages_map_cache = None
+    openlibrary._languages_map_fetched_at = 0.0
 
 
 class TestModels:
@@ -191,7 +201,7 @@ class TestLinks:
         )
         links = record.links()
         acq = [l for l in links if "/acquisition" in l.rel]
-        assert len(acq) == 1
+        assert len(acq) == 0
 
     def test_non_ia_provider_yields_acquisition_link(self):
         record = _record(
@@ -359,7 +369,7 @@ class TestExternalAcquisitionBuilder:
             _edition(key="/books/OL1M", ebook_access="public", availability={"status": "borrow_unavailable"}),
             _provider(url="https://example.org"),
         )
-        assert link.properties["availability"] == "unavailable"
+        assert link.properties["availability"] == "available"
 
     def test_provider_name_set_as_title(self):
         link = _build_external_acquisition_link(
@@ -415,8 +425,8 @@ class TestAcquisitionDispatch:
         expected = MagicMock()
         mock_builder.return_value = expected
         links = ol_acquisition_to_opds_links(
-            _edition(key="/books/OL1M"),
-            _provider(url="https://example.org", provider_name="standardebooks"),
+            _edition(key="/books/OL1M", ia=["ia-id"]),
+            _provider(url="https://example.org", provider_name="standardebooks", format="epub"),
         )
         mock_builder.assert_called_once()
         assert links == [expected]
@@ -503,21 +513,100 @@ class TestFormatAndLanguageHelpers:
     @pytest.mark.parametrize(
         "ol_format,mime",
         [
-            ("web", "text/html"),
-            ("pdf", "application/pdf"),
             ("epub", "application/epub+zip"),
+            ("pdf", "application/pdf"),
+            ("daisy", "application/daisy+zip"),
+            ("djvu", "image/vnd.djvu"),
+            ("mobi", "application/x-mobipocket-ebook"),
+            ("txt", "text/plain"),
+            ("web", "text/html"),
             ("audio", "audio/mpeg"),
         ],
     )
     def test_each_format_mapped(self, ol_format: str, mime: str):
         assert map_ol_format_to_mime(ol_format) == mime
 
-    def test_unknown_format_returns_none(self):
-        assert map_ol_format_to_mime("unknown") is None
+    def test_unknown_format_returns_octet_stream(self):
+        assert map_ol_format_to_mime("unknown") == "application/octet-stream"
 
-    @patch("pyopds2_openlibrary.requests.get")
+
+class TestGetRetryLogic:
+    @staticmethod
+    def _response(status_code: int, headers: dict[str, str] | None = None) -> httpx.Response:
+        return httpx.Response(status_code=status_code, headers=headers or {}, request=httpx.Request("GET", "https://example.org"))
+
+    @patch("pyopds2_openlibrary.httpx.get")
+    def test_returns_response_on_first_successful_request(self, mock_get):
+        response = self._response(200)
+        mock_get.return_value = response
+
+        result = openlibrary._get("https://example.org")
+
+        assert result is response
+        mock_get.assert_called_once()
+
+    @pytest.mark.parametrize("status_code", [500, 502, 503, 504])
+    @patch("pyopds2_openlibrary.httpx.get")
+    def test_retries_transient_http_errors_and_eventually_succeeds(self, mock_get, status_code: int):
+        mock_get.side_effect = [self._response(status_code), self._response(200)]
+
+        result = openlibrary._get("https://example.org")
+
+        assert result.status_code == 200
+        assert mock_get.call_count == 2
+
+    @patch("pyopds2_openlibrary._time.sleep")
+    @patch("pyopds2_openlibrary.httpx.get")
+    def test_retry_after_is_capped(self, mock_get, mock_sleep):
+        mock_get.side_effect = [
+            self._response(429, {"Retry-After": "1000"}),
+            self._response(200),
+        ]
+
+        result = openlibrary._get("https://example.org")
+
+        assert result.status_code == 200
+        mock_sleep.assert_any_call(10.0)
+
+    @patch("pyopds2_openlibrary.httpx.get")
+    def test_persistent_5xx_raises_after_retries_exhausted(self, mock_get):
+        mock_get.side_effect = [self._response(500), self._response(502), self._response(503)]
+
+        with pytest.raises(httpx.HTTPStatusError):
+            openlibrary._get("https://example.org")
+
+        assert mock_get.call_count == 3
+
+    @patch("pyopds2_openlibrary.httpx.get")
+    def test_404_raises_without_retry(self, mock_get):
+        mock_get.return_value = self._response(404)
+
+        with pytest.raises(httpx.HTTPStatusError):
+            openlibrary._get("https://example.org")
+
+        mock_get.assert_called_once()
+
+    @patch("pyopds2_openlibrary.httpx.get")
+    def test_transport_error_retries_then_raises(self, mock_get):
+        mock_get.side_effect = [httpx.TransportError("boom"), httpx.TransportError("boom"), httpx.TransportError("boom")]
+
+        with pytest.raises(httpx.TransportError):
+            openlibrary._get("https://example.org")
+
+        assert mock_get.call_count == 3
+
+    @patch("pyopds2_openlibrary.httpx.get")
+    def test_transport_error_still_retries_until_last_attempt(self, mock_get):
+        mock_get.side_effect = [httpx.TransportError("boom"), httpx.TransportError("boom"), self._response(200)]
+
+        result = openlibrary._get("https://example.org")
+
+        assert result.status_code == 200
+        assert mock_get.call_count == 3
+
+    @patch("pyopds2_openlibrary.httpx.get")
     def test_known_marc_code_to_iso_code(self, mock_get):
-        fetch_languages_map.cache_clear()
+        _reset_languages_map_cache()
         resp = MagicMock()
         resp.raise_for_status.return_value = None
         resp.json.return_value = [
@@ -526,9 +615,9 @@ class TestFormatAndLanguageHelpers:
         mock_get.return_value = resp
         assert marc_language_to_iso_639_1("eng") == "en"
 
-    @patch("pyopds2_openlibrary.requests.get")
+    @patch("pyopds2_openlibrary.httpx.get")
     def test_unknown_marc_code_returns_none(self, mock_get):
-        fetch_languages_map.cache_clear()
+        _reset_languages_map_cache()
         resp = MagicMock()
         resp.raise_for_status.return_value = None
         resp.json.return_value = [
@@ -537,9 +626,9 @@ class TestFormatAndLanguageHelpers:
         mock_get.return_value = resp
         assert marc_language_to_iso_639_1("fra") is None
 
-    @patch("pyopds2_openlibrary.requests.get")
+    @patch("pyopds2_openlibrary.httpx.get")
     def test_languages_without_iso_639_1_skipped(self, mock_get):
-        fetch_languages_map.cache_clear()
+        _reset_languages_map_cache()
         resp = MagicMock()
         resp.raise_for_status.return_value = None
         resp.json.return_value = [
@@ -551,9 +640,9 @@ class TestFormatAndLanguageHelpers:
         mapping = fetch_languages_map()
         assert mapping == {"eng": "en"}
 
-    @patch("pyopds2_openlibrary.requests.get")
+    @patch("pyopds2_openlibrary.httpx.get")
     def test_fetch_languages_map_cache_prevents_second_http_call(self, mock_get):
-        fetch_languages_map.cache_clear()
+        _reset_languages_map_cache()
         resp = MagicMock()
         resp.raise_for_status.return_value = None
         resp.json.return_value = [{"key": "/languages/eng", "identifiers": {"iso_639_1": ["en"]}}]
@@ -562,6 +651,21 @@ class TestFormatAndLanguageHelpers:
         second = fetch_languages_map()
         assert first == second == {"eng": "en"}
         assert mock_get.call_count == 1
+
+    @patch("pyopds2_openlibrary.httpx.get")
+    def test_fetch_languages_map_failure_returns_previous_cache(self, mock_get):
+        _reset_languages_map_cache()
+        cached = {"eng": "en"}
+        openlibrary._languages_map_cache = cached
+        openlibrary._languages_map_fetched_at = 0.0
+
+        mock_get.side_effect = httpx.TransportError("boom")
+
+        with patch("pyopds2_openlibrary._time.monotonic", return_value=openlibrary._LANGUAGES_MAP_TTL + 1):
+            mapping = fetch_languages_map()
+
+        assert mapping is cached
+        assert mock_get.call_count == 3
 
 
 class TestPriceParsing:
@@ -583,7 +687,7 @@ class TestPriceParsing:
 
 class TestFilterHelpers:
     def test_has_acquisition_options_true_with_providers_with_urls(self):
-        record = _record_with_edition_providers(_provider(url="https://example.org/book"))
+        record = _record_with_edition_providers(_provider(url="https://example.org/book", format="epub"))
         assert _has_acquisition_options(record) is True
 
     def test_has_acquisition_options_no_edition_false(self):
@@ -597,7 +701,7 @@ class TestFilterHelpers:
         record = _record(
             key="/works/OL1W",
             title="Book",
-            editions={"docs": [{"key": "/books/OL1M", "title": "Ed", "ebook_access": "public", "providers": [{"url": "https://x"}]}]},
+            editions={"docs": [{"key": "/books/OL1M", "title": "Ed", "cover_i": 123, "ebook_access": "public", "providers": [{"url": "https://x", "format": "epub"}]}]},
         )
         assert _is_currently_available(record) is True
 
@@ -605,7 +709,7 @@ class TestFilterHelpers:
         record = _record(
             key="/works/OL1W",
             title="Book",
-            editions={"docs": [{"key": "/books/OL1M", "title": "Ed", "availability": {"status": "borrow_unavailable"}, "providers": [{"url": "https://x"}]}]},
+            editions={"docs": [{"key": "/books/OL1M", "title": "Ed", "cover_i": 123, "availability": {"status": "borrow_unavailable"}, "providers": [{"url": "https://x", "format": "epub"}]}]},
         )
         assert _is_currently_available(record) is False
 
@@ -613,7 +717,7 @@ class TestFilterHelpers:
         record = _record(
             key="/works/OL1W",
             title="Book",
-            editions={"docs": [{"key": "/books/OL1M", "title": "Ed", "availability": {"status": "borrow_available"}, "providers": [{"url": "https://x"}]}]},
+            editions={"docs": [{"key": "/books/OL1M", "title": "Ed", "cover_i": 123, "availability": {"status": "borrow_available"}, "providers": [{"url": "https://x", "format": "epub"}]}]},
         )
         assert _is_currently_available(record) is True
 
@@ -649,7 +753,7 @@ class TestFilterHelpers:
 
 
 class TestResolvePreferredEdition:
-    @patch("pyopds2_openlibrary.requests.get")
+    @patch("pyopds2_openlibrary.httpx.get")
     def test_returns_matching_edition(self, mock_get):
         first = MagicMock()
         first.raise_for_status.return_value = None
@@ -682,7 +786,7 @@ class TestResolvePreferredEdition:
         assert resolved is not None
         assert resolved.edition.key == "/books/OL999M"
 
-    @patch("pyopds2_openlibrary.requests.get")
+    @patch("pyopds2_openlibrary.httpx.get")
     def test_returns_none_when_no_language_match(self, mock_get):
         first = MagicMock()
         first.raise_for_status.return_value = None
@@ -694,11 +798,11 @@ class TestResolvePreferredEdition:
         mock_get.return_value = first
         assert _resolve_preferred_edition("/works/OL1W", "eng", ["key"]) is None
 
-    @patch("pyopds2_openlibrary.requests.get", side_effect=Exception("boom"))
+    @patch("pyopds2_openlibrary.httpx.get", side_effect=Exception("boom"))
     def test_returns_none_on_http_failure(self, _):
         assert _resolve_preferred_edition("/works/OL1W", "eng", ["key"]) is None
 
-    @patch("pyopds2_openlibrary.requests.get")
+    @patch("pyopds2_openlibrary.httpx.get")
     def test_author_data_populated_from_preferred_edition_search(self, mock_get):
         first = MagicMock()
         first.raise_for_status.return_value = None
@@ -710,7 +814,7 @@ class TestResolvePreferredEdition:
                 {
                     "author_name": ["Localized Name"],
                     "author_key": ["OLLOCAL"],
-                    "editions": {"docs": [{"key": "/books/OL111M", "title": "Localized", "providers": [{"url": "https://x"}]}]},
+                    "editions": {"docs": [{"key": "/books/OL111M", "title": "Localized", "cover_i": 123, "providers": [{"url": "https://x", "format": "epub"}]}]},
                 }
             ]
         }
@@ -723,7 +827,7 @@ class TestResolvePreferredEdition:
 class TestAvailabilityFacetPrimitive:
     def test_all_modes_included_by_default(self):
         links = _build_availability_links(mode="everything", href_fn=lambda m: f"/search?mode={m}")
-        assert [l["title"] for l in links] == ["All", "Available to Borrow", "Open Access", "Buyable"]
+        assert [l["title"] for l in links] == ["Everything", "Available to Borrow", "Open Access", "Available to Purchase"]
 
     def test_active_mode_gets_self_rel(self):
         links = _build_availability_links(mode="ebooks", href_fn=lambda m: f"/search?mode={m}")
@@ -764,34 +868,44 @@ class TestAvailabilityFacetPrimitive:
 
 
 class TestFacetBuilders:
-    def test_build_facets_returns_sort_and_availability_groups(self):
+    def test_build_facets_returns_availability_group(self):
         facets = build_facets(base_url="https://example.org/opds", query="cats")
-        assert len(facets) == 2
-        assert facets[0]["metadata"]["title"] == "Sort"
-        assert facets[1]["metadata"]["title"] == "Availability"
+        assert len(facets) == 1
+        assert facets[0]["metadata"]["title"] == "Availability"
 
-    def test_build_facets_sort_links_titles(self):
+    def test_build_facets_availability_links_titles(self):
         facets = build_facets(base_url="https://example.org/opds", query="cats")
         titles = [l["title"] for l in facets[0]["links"]]
-        assert titles == ["Trending", "Most Recent", "Relevance"]
-
-    def test_build_facets_active_sort_self_and_sort_rel(self):
-        facets = build_facets(base_url="https://example.org/opds", query="cats", sort="new")
-        most_recent = next(l for l in facets[0]["links"] if l["title"] == "Most Recent")
-        assert most_recent["rel"] == ["self", "http://opds-spec.org/sort/new"]
-
-    def test_build_facets_sort_links_number_of_items(self):
-        facets = build_facets(base_url="https://example.org/opds", query="cats", total=123)
-        assert all(l["properties"]["numberOfItems"] == 123 for l in facets[0]["links"])
-
-    def test_build_facets_availability_links_point_to_search(self):
-        facets = build_facets(base_url="https://example.org/opds", query="cats")
-        assert all("/search?" in l["href"] for l in facets[1]["links"])
+        assert titles == ["Everything", "Available to Borrow", "Open Access", "Available to Purchase"]
 
     def test_build_facets_active_availability_has_self_rel(self):
         facets = build_facets(base_url="https://example.org/opds", query="cats", mode="open_access")
-        active = next(l for l in facets[1]["links"] if l["title"] == "Open Access")
+        active = next(l for l in facets[0]["links"] if l["title"] == "Open Access")
         assert active["rel"] == "self"
+
+    def test_build_facets_number_of_items_and_language_param(self):
+        counts = {"everything": 100, "ebooks": 80, "open_access": 30, "buyable": None}
+        facets = build_facets(
+            base_url="https://example.org/opds",
+            query="cats",
+            sort="new",
+            mode="everything",
+            total=123,
+            availability_counts=counts,
+        )
+        availability_links = {l["title"]: l for l in facets[0]["links"]}
+        assert availability_links["Everything"]["properties"]["numberOfItems"] == 100
+        assert availability_links["Available to Borrow"]["properties"]["numberOfItems"] == 80
+        assert availability_links["Open Access"]["properties"]["numberOfItems"] == 30
+        assert "properties" not in availability_links["Available to Purchase"]
+        for link in facets[0]["links"]:
+            parsed = parse_qs(urlparse(link["href"]).query)
+            assert parsed.get("language") == ["eng"]
+            assert parsed.get("query") == ["cats"]
+
+    def test_build_facets_availability_links_point_to_search(self):
+        facets = build_facets(base_url="https://example.org/opds", query="cats")
+        assert all("/search?" in l["href"] for l in facets[0]["links"])
 
     def test_build_home_facets_returns_availability_only(self):
         facets = OpenLibraryDataProvider.build_home_facets(base_url="https://example.org/opds", mode="everything")
@@ -800,7 +914,7 @@ class TestFacetBuilders:
 
     def test_build_home_facets_uses_home_labels(self):
         facets = OpenLibraryDataProvider.build_home_facets(base_url="https://example.org/opds", mode="everything")
-        assert [l["title"] for l in facets[0]["links"]] == ["Everything", "Borrowable", "Open Access"]
+        assert [l["title"] for l in facets[0]["links"]] == ["Everything", "Available to Borrow", "Open Access"]
 
     def test_build_home_facets_excludes_buyable(self):
         facets = OpenLibraryDataProvider.build_home_facets(base_url="https://example.org/opds", mode="everything")
@@ -814,7 +928,7 @@ class TestFacetBuilders:
 
 
 class TestFacetCounts:
-    @patch("pyopds2_openlibrary.requests.get")
+    @patch("pyopds2_openlibrary.httpx.get")
     def test_count_fetch_returns_all_modes(self, mock_get):
         def _side_effect(*args, **kwargs):
             response = MagicMock()
@@ -843,7 +957,7 @@ class TestFacetCounts:
         called_modes = [call.args[1] for call in mock_count.call_args_list]
         assert "ebooks" not in called_modes
 
-    @patch("pyopds2_openlibrary.requests.get")
+    @patch("pyopds2_openlibrary.httpx.get")
     def test_ebooks_mode_appends_ebook_access_filter(self, mock_get):
         resp = MagicMock()
         resp.raise_for_status.return_value = None
@@ -852,7 +966,7 @@ class TestFacetCounts:
         OpenLibraryDataProvider._count_for_mode("cats", "ebooks")
         assert mock_get.call_args.kwargs["params"]["q"] == "cats ebook_access:[printdisabled TO *]"
 
-    @patch("pyopds2_openlibrary.requests.get")
+    @patch("pyopds2_openlibrary.httpx.get")
     def test_open_access_mode_appends_public_filter(self, mock_get):
         resp = MagicMock()
         resp.raise_for_status.return_value = None
@@ -881,20 +995,22 @@ class TestSearch:
                     {
                         "key": work_key.replace("/works", "/books").replace("W", "M"),
                         "title": title,
+                        "cover_i": 123,
                         "ebook_access": ebook_access,
                         "availability": {"status": status},
-                        "providers": providers if providers is not None else [{"url": "https://example.org/read", "access": "borrow", "price": price}],
+                        "providers": providers if providers is not None else [{"url": "https://example.org/read", "access": "borrow", "format": "epub", "price": price}],
                     }
                 ]
             }
         return {
             "key": work_key,
             "title": title,
+            "cover_i": 123,
             "ebook_access": ebook_access,
             "editions": editions,
         }
 
-    @patch("pyopds2_openlibrary.requests.get")
+    @patch("pyopds2_openlibrary.httpx.get")
     def test_basic_search_returns_search_response(self, mock_get):
         response = MagicMock()
         response.raise_for_status.return_value = None
@@ -903,10 +1019,10 @@ class TestSearch:
             "docs": [self._search_doc("/works/OL1W", "Book", "9.99 USD", "borrow_available")],
         }
         mock_get.return_value = response
-        result = OpenLibraryDataProvider.search("cats")
+        result = OpenLibraryDataProvider.search("cats", facets={"mode": "everything"})
         assert isinstance(result, DataProvider.SearchResponse)
 
-    @patch("pyopds2_openlibrary.requests.get")
+    @patch("pyopds2_openlibrary.httpx.get")
     def test_mode_ebooks_appends_filter(self, mock_get):
         response = MagicMock()
         response.raise_for_status.return_value = None
@@ -915,7 +1031,7 @@ class TestSearch:
         OpenLibraryDataProvider.search("cats", facets={"mode": "ebooks"})
         assert mock_get.call_args.kwargs["params"]["q"] == "cats ebook_access:[printdisabled TO *]"
 
-    @patch("pyopds2_openlibrary.requests.get")
+    @patch("pyopds2_openlibrary.httpx.get")
     def test_mode_open_access_appends_filter(self, mock_get):
         response = MagicMock()
         response.raise_for_status.return_value = None
@@ -924,7 +1040,7 @@ class TestSearch:
         OpenLibraryDataProvider.search("cats", facets={"mode": "open_access"})
         assert mock_get.call_args.kwargs["params"]["q"] == "cats ebook_access:public"
 
-    @patch("pyopds2_openlibrary.requests.get")
+    @patch("pyopds2_openlibrary.httpx.get")
     def test_mode_buyable_filters_to_non_free_providers(self, mock_get):
         response = MagicMock()
         response.raise_for_status.return_value = None
@@ -939,7 +1055,7 @@ class TestSearch:
         result = OpenLibraryDataProvider.search("cats", facets={"mode": "buyable"})
         assert [r.title for r in result.records] == ["Paid"]
 
-    @patch("pyopds2_openlibrary.requests.get")
+    @patch("pyopds2_openlibrary.httpx.get")
     def test_mode_buyable_total_equals_filtered_len(self, mock_get):
         response = MagicMock()
         response.raise_for_status.return_value = None
@@ -954,7 +1070,7 @@ class TestSearch:
         result = OpenLibraryDataProvider.search("cats", facets={"mode": "buyable"})
         assert result.total == len(result.records) == 1
 
-    @patch("pyopds2_openlibrary.requests.get")
+    @patch("pyopds2_openlibrary.httpx.get")
     def test_mode_everything_no_ebook_filter(self, mock_get):
         response = MagicMock()
         response.raise_for_status.return_value = None
@@ -963,7 +1079,7 @@ class TestSearch:
         OpenLibraryDataProvider.search("cats", facets={"mode": "everything"})
         assert mock_get.call_args.kwargs["params"]["q"] == "cats"
 
-    @patch("pyopds2_openlibrary.requests.get")
+    @patch("pyopds2_openlibrary.httpx.get")
     def test_records_without_acquisition_options_are_filtered(self, mock_get):
         response = MagicMock()
         response.raise_for_status.return_value = None
@@ -982,7 +1098,7 @@ class TestSearch:
                     "Has provider",
                     "0.00 USD",
                     "borrow_available",
-                    providers=[{"url": "https://example.org/read", "access": "borrow"}],
+                    providers=[{"url": "https://example.org/read", "access": "borrow", "format": "epub"}],
                 ),
             ],
         }
@@ -990,23 +1106,24 @@ class TestSearch:
         result = OpenLibraryDataProvider.search("cats", facets={"mode": "everything"})
         assert [r.title for r in result.records] == ["Has provider"]
 
-    @pytest.mark.parametrize("mode", ["ebooks", "open_access", "buyable"])
-    @patch("pyopds2_openlibrary.requests.get")
+    @pytest.mark.parametrize("mode", ["ebooks", "buyable"])
+    @patch("pyopds2_openlibrary.httpx.get")
     def test_available_books_sorted_before_unavailable(self, mock_get, mode: str):
+        ebook_access = "public" if mode == "open_access" else "printdisabled"
         response = MagicMock()
         response.raise_for_status.return_value = None
         response.json.return_value = {
             "numFound": 2,
             "docs": [
-                self._search_doc("/works/OL1W", "Unavailable", "9.99 USD", "borrow_unavailable"),
-                self._search_doc("/works/OL2W", "Available", "9.99 USD", "borrow_available"),
+                self._search_doc("/works/OL1W", "Unavailable", "9.99 USD", "borrow_unavailable", ebook_access=ebook_access),
+                self._search_doc("/works/OL2W", "Available", "9.99 USD", "borrow_available", ebook_access=ebook_access),
             ],
         }
         mock_get.return_value = response
         result = OpenLibraryDataProvider.search("cats", facets={"mode": mode})
         assert [r.title for r in result.records][:2] == ["Available", "Unavailable"]
 
-    @patch("pyopds2_openlibrary.requests.get")
+    @patch("pyopds2_openlibrary.httpx.get")
     def test_language_matched_editions_moved_first(self, mock_get):
         response = MagicMock()
         response.raise_for_status.return_value = None
@@ -1022,14 +1139,16 @@ class TestSearch:
                         {
                             "key": "/books/OLFRA",
                             "title": "French",
+                            "cover_i": 123,
                             "language": ["fre"],
-                            "providers": [{"url": "https://example.org/fr"}],
+                            "providers": [{"url": "https://example.org/fr", "format": "epub"}],
                         },
                         {
                             "key": "/books/OLENG",
                             "title": "English",
+                            "cover_i": 123,
                             "language": ["eng"],
-                            "providers": [{"url": "https://example.org/en"}],
+                            "providers": [{"url": "https://example.org/en", "format": "epub"}],
                         },
                     ],
                 )
@@ -1040,7 +1159,7 @@ class TestSearch:
         assert result.records[0].editions.docs[0].key == "/books/OLENG"
 
     @patch("pyopds2_openlibrary._resolve_preferred_edition")
-    @patch("pyopds2_openlibrary.requests.get")
+    @patch("pyopds2_openlibrary.httpx.get")
     def test_edition_key_query_substitutes_foreign_language_edition(self, mock_get, mock_resolve):
         response = MagicMock()
         response.raise_for_status.return_value = None
@@ -1056,8 +1175,9 @@ class TestSearch:
                         {
                             "key": "/books/OLFRA",
                             "title": "French",
+                            "cover_i": 123,
                             "language": ["fre"],
-                            "providers": [{"url": "https://example.org/fr"}],
+                            "providers": [{"url": "https://example.org/fr", "format": "epub"}],
                         }
                     ],
                 )
@@ -1069,8 +1189,9 @@ class TestSearch:
                 {
                     "key": "/books/OLENG",
                     "title": "English",
+                    "cover_i": 123,
                     "language": ["eng"],
-                    "providers": [{"url": "https://example.org/en"}],
+                    "providers": [{"url": "https://example.org/en", "format": "epub"}],
                 }
             ),
             author_name=["Localized Author"],
@@ -1081,7 +1202,7 @@ class TestSearch:
         assert result.records[0].editions.docs[0].key == "/books/OLENG"
         assert result.records[0].author_name == ["Localized Author"]
 
-    @patch("pyopds2_openlibrary.requests.get")
+    @patch("pyopds2_openlibrary.httpx.get")
     def test_title_parameter_propagates_to_response_title(self, mock_get):
         response = MagicMock()
         response.raise_for_status.return_value = None
@@ -1093,7 +1214,7 @@ class TestSearch:
         result = OpenLibraryDataProvider.search("cats", title="Curated")
         assert result.title == "Curated"
 
-    @patch("pyopds2_openlibrary.requests.get")
+    @patch("pyopds2_openlibrary.httpx.get")
     def test_title_injected_into_pagination_params(self, mock_get):
         response = MagicMock()
         response.raise_for_status.return_value = None
@@ -1105,7 +1226,7 @@ class TestSearch:
         result = OpenLibraryDataProvider.search("cats", limit=10, offset=20, title="Curated")
         assert result.params["title"] == "Curated"
 
-    @patch("pyopds2_openlibrary.requests.get")
+    @patch("pyopds2_openlibrary.httpx.get")
     def test_no_title_leaves_params_unchanged(self, mock_get):
         response = MagicMock()
         response.raise_for_status.return_value = None
