@@ -547,7 +547,7 @@ _AVAILABILITY_MODES: list[tuple[str, str]] = [
     ("everything",  "Everything"),
     ("ebooks",      "Available to Borrow"),
     ("open_access", "Open Access"),
-    ("buyable",     "Available to Purchase"),
+    ("buyable",     "Available for Purchase"),
 ]
 
 
