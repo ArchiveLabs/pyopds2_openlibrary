@@ -265,7 +265,7 @@ def _build_external_acquisition_link(
         link.title = acq.provider_name
         link.properties["indirectAcquisition"] = [
             {
-                "type": link.type or "application/octet-stream",
+                "type": link.type,
                 "title": acq.provider_name,
             }
         ]
