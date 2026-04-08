@@ -667,7 +667,7 @@ class OpenLibraryDataProvider(DataProvider):
         query: str,
         sort: Optional[str] = None,
         mode: str = "everything",
-        language: str = "eng",
+        language: str = "en",
         total: Optional[int] = None,
         availability_counts: Optional[dict[str, int]] = None,
     ) -> list[dict]:
@@ -680,7 +680,7 @@ class OpenLibraryDataProvider(DataProvider):
         To re-enable sort: add the Sort group dict to the returned list.
 
         Args:
-            language: MARC language code included in every facet href so the
+            language: Language code included in every facet href so the
                 active language filter is preserved when clients follow links.
             total: Reserved for Sort links when re-enabled.
             availability_counts: ``{mode_value: item_count}`` per OPDS 2.0 §2.4.
@@ -692,7 +692,7 @@ class OpenLibraryDataProvider(DataProvider):
             if mode_val and mode_val != "everything":
                 params["mode"] = mode_val
             if language:
-                params["language"] = language
+                params["language"] = "en" if language == "eng" else language
             return f"{base_url}/search?{urlencode(params)}"
 
         # Sort group is unplugged but preserved — re-enable by adding:
@@ -741,7 +741,7 @@ class OpenLibraryDataProvider(DataProvider):
         offset: int = 0,
         sort: Optional[str] = None,
         facets: Optional[dict[str, str]] = None,
-        language: str = "eng",
+        language: str = "en",
         title: Optional[str] = None,
     ) -> DataProvider.SearchResponse:
         """
@@ -766,12 +766,14 @@ class OpenLibraryDataProvider(DataProvider):
                       (``ebook_access:[printdisabled TO *]``), then hide
                       records without acquisition options and keep only
                       those that have at least one non-free provider.
-            language: Reserved for future use. Currently only ``"eng"``
-                (English) is supported; any other value is ignored and
+            language: Currently English is supported. ``"en"`` and ``"eng"``
+                are treated as English; any other value is ignored and
                 English is used instead. Multi-language support will be
                 added via browser-language / facet selection in a future
                 release.
         """
+        preferred_language = "eng" if language in ("en", "eng") else "eng"
+
         fields = [
             "key", "title", "editions", "description", "providers", "author_name", "ia",
             "cover_i", "availability", "ebook_access", "author_key", "subtitle", "language",
@@ -800,7 +802,7 @@ class OpenLibraryDataProvider(DataProvider):
             "fields": ",".join(fields),
             # Ask OL to prefer editions in the requested language.
             # This works for general queries but is ignored when edition_key: is present.
-            **({'lang': language} if language else {}),
+            **({'lang': preferred_language} if preferred_language else {}),
         }
         r = _get(f"{OpenLibraryDataProvider.BASE_URL}/search.json", params=params)
         data = r.json()
@@ -818,7 +820,7 @@ class OpenLibraryDataProvider(DataProvider):
         # When the query targets a specific edition (edition_key:), OL ignores the
         # lang param and always returns that edition.  If its language doesn't match
         # the preference, resolve the correct edition from the work.
-        if language and "edition_key:" in query:
+        if preferred_language and "edition_key:" in query:
             edition_fields = [
                 "key", "title", "subtitle", "description", "cover_i",
                 "ebook_access", "language", "ia", "availability", "providers",
@@ -826,9 +828,9 @@ class OpenLibraryDataProvider(DataProvider):
             for record in records:
                 if record.editions and record.editions.docs:
                     ed = record.editions.docs[0]
-                    if not ed.language or language not in ed.language:
+                    if not ed.language or preferred_language not in ed.language:
                         preferred = _resolve_preferred_edition(
-                            record.key or "", language, edition_fields
+                            record.key or "", preferred_language, edition_fields
                         )
                         # Always prefer the language-matched edition over a foreign-language
                         # one, even if its ebook-access rank is lower. Language
@@ -845,11 +847,11 @@ class OpenLibraryDataProvider(DataProvider):
 
         # When OL returns multiple editions, move language-matching ones first
         # (fallback for cases where lang param alone isn't sufficient).
-        if language:
+        if preferred_language:
             for record in records:
                 if record.editions and record.editions.docs and len(record.editions.docs) > 1:
-                    matched = [d for d in record.editions.docs if d.language and language in d.language]
-                    others = [d for d in record.editions.docs if not (d.language and language in d.language)]
+                    matched = [d for d in record.editions.docs if d.language and preferred_language in d.language]
+                    others = [d for d in record.editions.docs if not (d.language and preferred_language in d.language)]
                     if matched:
                         record.editions.docs = matched + others
 
