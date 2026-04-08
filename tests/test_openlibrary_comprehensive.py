@@ -900,7 +900,7 @@ class TestFacetBuilders:
         assert "properties" not in availability_links["Available for Purchase"]
         for link in facets[0]["links"]:
             parsed = parse_qs(urlparse(link["href"]).query)
-            assert parsed.get("language") == ["eng"]
+            assert parsed.get("language") == ["en"]
             assert parsed.get("query") == ["cats"]
 
     def test_build_facets_availability_links_point_to_search(self):
