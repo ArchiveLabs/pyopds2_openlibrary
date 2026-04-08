@@ -592,47 +592,6 @@ def _build_availability_links(
         links.append(link)
     return links
 
-
-def _build_sort_links(
-    sort: Optional[str],
-    href_fn: typing.Callable[[Optional[str]], str],
-    total: Optional[int] = None,
-) -> list[dict]:
-    """Build sort facet links.
-
-    Not currently included in build_facets output.
-    To re-enable: add the Sort group to the build_facets return list:
-        {"metadata": {"title": "Sort"},
-         "links": _build_sort_links(sort, lambda sv: search_href(sort_val=sv), total)}
-    """
-    active_sort = sort or ""
-
-    def _sort_link(
-        title: str,
-        active: bool,
-        rel: Optional[str],
-        sort_val: Optional[str],
-    ) -> dict:
-        link: dict = {
-            "type": "application/opds+json",
-            "title": title,
-            "href": href_fn(sort_val),
-        }
-        if active:
-            link["rel"] = ["self", rel] if rel else "self"
-        elif rel:
-            link["rel"] = rel
-        if total is not None:
-            link.setdefault("properties", {})["numberOfItems"] = total
-        return link
-
-    return [
-        _sort_link("Trending",    active_sort == "trending", "http://opds-spec.org/sort/popular", "trending"),
-        _sort_link("Most Recent", active_sort == "new",      "http://opds-spec.org/sort/new",     "new"),
-        _sort_link("Relevance",   active_sort == "",         None,                                ""),
-    ]
-
-
 class OpenLibraryDataProvider(DataProvider):
     """Data provider for Open Library records."""
     BASE_URL: str = "https://openlibrary.org"

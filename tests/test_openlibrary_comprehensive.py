@@ -827,7 +827,7 @@ class TestResolvePreferredEdition:
 class TestAvailabilityFacetPrimitive:
     def test_all_modes_included_by_default(self):
         links = _build_availability_links(mode="everything", href_fn=lambda m: f"/search?mode={m}")
-        assert [l["title"] for l in links] == ["Everything", "Available to Borrow", "Open Access", "Available to Purchase"]
+        assert [l["title"] for l in links] == ["Everything", "Available to Borrow", "Open Access", "Available for Purchase"]
 
     def test_active_mode_gets_self_rel(self):
         links = _build_availability_links(mode="ebooks", href_fn=lambda m: f"/search?mode={m}")
@@ -876,7 +876,7 @@ class TestFacetBuilders:
     def test_build_facets_availability_links_titles(self):
         facets = build_facets(base_url="https://example.org/opds", query="cats")
         titles = [l["title"] for l in facets[0]["links"]]
-        assert titles == ["Everything", "Available to Borrow", "Open Access", "Available to Purchase"]
+        assert titles == ["Everything", "Available to Borrow", "Open Access", "Available for Purchase"]
 
     def test_build_facets_active_availability_has_self_rel(self):
         facets = build_facets(base_url="https://example.org/opds", query="cats", mode="open_access")
@@ -897,7 +897,7 @@ class TestFacetBuilders:
         assert availability_links["Everything"]["properties"]["numberOfItems"] == 100
         assert availability_links["Available to Borrow"]["properties"]["numberOfItems"] == 80
         assert availability_links["Open Access"]["properties"]["numberOfItems"] == 30
-        assert "properties" not in availability_links["Available to Purchase"]
+        assert "properties" not in availability_links["Available for Purchase"]
         for link in facets[0]["links"]:
             parsed = parse_qs(urlparse(link["href"]).query)
             assert parsed.get("language") == ["eng"]

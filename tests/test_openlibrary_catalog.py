@@ -671,7 +671,7 @@ class TestFacetCountsAndBuilder:
         assert facets[0]["metadata"]["title"] == "Availability"
 
         availability_titles = [l["title"] for l in facets[0]["links"]]
-        assert availability_titles == ["Everything", "Available to Borrow", "Open Access", "Available to Purchase"]
+        assert availability_titles == ["Everything", "Available to Borrow", "Open Access", "Available for Purchase"]
 
         for link in facets[0]["links"]:
             assert link["type"] == "application/opds+json"
@@ -710,7 +710,7 @@ class TestFacetCountsAndBuilder:
         assert availability_links["Everything"]["properties"]["numberOfItems"] == 100
         assert availability_links["Available to Borrow"]["properties"]["numberOfItems"] == 80
         assert availability_links["Open Access"]["properties"]["numberOfItems"] == 30
-        assert "properties" not in availability_links["Available to Purchase"]
+        assert "properties" not in availability_links["Available for Purchase"]
 
     def test_build_facets_href_mode_and_sort_params(self):
         facets = build_facets(base_url="https://example.org/opds", query="my query", sort="", mode="everything")
@@ -720,7 +720,7 @@ class TestFacetCountsAndBuilder:
         assert parsed_all.get("language") == ["eng"]
         assert parsed_all.get("query") == ["my query"]
 
-        buyable_link = next(l for l in facets[0]["links"] if l["title"] == "Available to Purchase")
+        buyable_link = next(l for l in facets[0]["links"] if l["title"] == "Available for Purchase")
         parsed_buyable = parse_qs(urlparse(buyable_link["href"]).query)
         assert parsed_buyable.get("mode") == ["buyable"]
 
