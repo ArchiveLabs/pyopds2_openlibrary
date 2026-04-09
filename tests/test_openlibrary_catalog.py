@@ -667,8 +667,9 @@ class TestFacetCountsAndBuilder:
     def test_build_facets_groups_and_links_and_rels(self):
         facets = build_facets(base_url="https://example.org/opds", query="fox", sort="new", mode="ebooks")
 
-        assert len(facets) == 1
+        assert len(facets) == 2
         assert facets[0]["metadata"]["title"] == "Availability"
+        assert facets[1]["metadata"]["title"] == "Language"
 
         availability_titles = [l["title"] for l in facets[0]["links"]]
         assert availability_titles == ["Everything", "Available to Borrow", "Open Access", "Available for Purchase"]
@@ -684,7 +685,7 @@ class TestFacetCountsAndBuilder:
         everything = next(l for l in facets[0]["links"] if l["title"] == "Everything")
         parsed = parse_qs(urlparse(everything["href"]).query)
         assert parsed.get("query") == ["fox"]
-        assert parsed.get("language") == ["en"]
+        assert parsed.get("language") is None
 
     def test_build_facets_number_of_items_and_none_behavior(self):
         counts = {
@@ -717,7 +718,7 @@ class TestFacetCountsAndBuilder:
         all_link = next(l for l in facets[0]["links"] if l["title"] == "Everything")
         parsed_all = parse_qs(urlparse(all_link["href"]).query)
         assert "mode" not in parsed_all
-        assert parsed_all.get("language") == ["en"]
+        assert parsed_all.get("language") is None
         assert parsed_all.get("query") == ["my query"]
 
         buyable_link = next(l for l in facets[0]["links"] if l["title"] == "Available for Purchase")

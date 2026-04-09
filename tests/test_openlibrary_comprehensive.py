@@ -870,8 +870,9 @@ class TestAvailabilityFacetPrimitive:
 class TestFacetBuilders:
     def test_build_facets_returns_availability_group(self):
         facets = build_facets(base_url="https://example.org/opds", query="cats")
-        assert len(facets) == 1
+        assert len(facets) == 2
         assert facets[0]["metadata"]["title"] == "Availability"
+        assert facets[1]["metadata"]["title"] == "Language"
 
     def test_build_facets_availability_links_titles(self):
         facets = build_facets(base_url="https://example.org/opds", query="cats")
@@ -900,7 +901,7 @@ class TestFacetBuilders:
         assert "properties" not in availability_links["Available for Purchase"]
         for link in facets[0]["links"]:
             parsed = parse_qs(urlparse(link["href"]).query)
-            assert parsed.get("language") == ["en"]
+            assert parsed.get("language") is None
             assert parsed.get("query") == ["cats"]
 
     def test_build_facets_availability_links_point_to_search(self):
@@ -909,8 +910,9 @@ class TestFacetBuilders:
 
     def test_build_home_facets_returns_availability_only(self):
         facets = OpenLibraryDataProvider.build_home_facets(base_url="https://example.org/opds", mode="everything")
-        assert len(facets) == 1
+        assert len(facets) == 2
         assert facets[0]["metadata"]["title"] == "Availability"
+        assert facets[1]["metadata"]["title"] == "Language"
 
     def test_build_home_facets_uses_home_labels(self):
         facets = OpenLibraryDataProvider.build_home_facets(base_url="https://example.org/opds", mode="everything")
@@ -1155,7 +1157,7 @@ class TestSearch:
             ],
         }
         mock_get.return_value = response
-        result = OpenLibraryDataProvider.search("cats")
+        result = OpenLibraryDataProvider.search("cats", language="eng")
         assert result.records[0].editions.docs[0].key == "/books/OLENG"
 
     @patch("pyopds2_openlibrary._resolve_preferred_edition")
@@ -1198,7 +1200,7 @@ class TestSearch:
             author_key=["OLAUTH"],
         )
 
-        result = OpenLibraryDataProvider.search("edition_key:OLFRA")
+        result = OpenLibraryDataProvider.search("edition_key:OLFRA", language="eng")
         assert result.records[0].editions.docs[0].key == "/books/OLENG"
         assert result.records[0].author_name == ["Localized Author"]
 
