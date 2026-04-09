@@ -293,6 +293,10 @@ class TestIaAlternateBuilder:
         link = _build_ia_alternate_link(_edition(key="/books/OL1M", ia=["abc123"]))
         assert link.type == "application/opds-publication+json"
 
+    def test_ia_alternate_title(self):
+        link = _build_ia_alternate_link(_edition(key="/books/OL1M", ia=["abc123"]))
+        assert link.title == "Internet Archive"
+
     def test_ia_alternate_authenticate_property(self):
         link = _build_ia_alternate_link(_edition(key="/books/OL1M", ia=["abc123"]))
         auth = link.properties["authenticate"]
@@ -403,6 +407,20 @@ class TestExternalAcquisitionBuilder:
         link = _build_external_acquisition_link(_edition(key="/books/OL1M"), _provider(url="https://example.org"))
         assert "price" not in link.properties
 
+    def test_web_buy_link_omits_availability_and_indirect_acquisition(self):
+        link = _build_external_acquisition_link(
+            _edition(key="/books/OL1M", ebook_access="public", availability={"status": "borrow_unavailable"}),
+            _provider(
+                url="https://bookstore.example.org/item",
+                access="buy",
+                format="web",
+                provider_name="Bookstore",
+            ),
+        )
+        assert link.rel == "http://opds-spec.org/acquisition/open-access"
+        assert "availability" not in link.properties
+        assert "indirectAcquisition" not in link.properties
+
 
 class TestAcquisitionDispatch:
     def test_raises_value_error_when_url_missing(self):
@@ -430,6 +448,26 @@ class TestAcquisitionDispatch:
         )
         mock_builder.assert_called_once()
         assert links == [expected]
+
+    @patch("pyopds2_openlibrary._build_external_acquisition_link")
+    def test_web_buy_dispatches_external_builder(self, mock_builder):
+        expected = MagicMock()
+        mock_builder.return_value = expected
+        links = ol_acquisition_to_opds_links(
+            _edition(key="/books/OL1M"),
+            _provider(url="https://bookstore.example.org/item", format="web", access="buy"),
+        )
+        mock_builder.assert_called_once()
+        assert links == [expected]
+
+    @patch("pyopds2_openlibrary._build_external_acquisition_link")
+    def test_web_non_buy_is_filtered_out(self, mock_builder):
+        links = ol_acquisition_to_opds_links(
+            _edition(key="/books/OL1M"),
+            _provider(url="https://example.org/read", format="web", access="borrow"),
+        )
+        mock_builder.assert_not_called()
+        assert links == []
 
 
 class TestImages:
