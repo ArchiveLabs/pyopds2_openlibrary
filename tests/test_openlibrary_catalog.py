@@ -178,7 +178,7 @@ class TestOpenLibraryDataRecord:
             key="/works/OL45804W",
             title="Test Book",
             subtitle="A Test Subtitle",
-            description="A test description",
+            description="**A** test [description](https://example.org)",
             author_name=["Test Author"],
             author_key=["OL12345A"],
             language=["eng"],

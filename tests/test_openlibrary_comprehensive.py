@@ -929,6 +929,7 @@ class TestFacetBuilders:
             query="cats",
             sort="new",
             mode="everything",
+            title="Curated",
             total=123,
             availability_counts=counts,
         )
@@ -941,6 +942,7 @@ class TestFacetBuilders:
             parsed = parse_qs(urlparse(link["href"]).query)
             assert parsed.get("language") is None
             assert parsed.get("query") == ["cats"]
+            assert parsed.get("title") == ["Curated"]
 
     def test_build_facets_availability_links_point_to_search(self):
         facets = build_facets(base_url="https://example.org/opds", query="cats")

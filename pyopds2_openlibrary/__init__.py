@@ -1,10 +1,13 @@
+import re as _re
 import time as _time
 import typing
+from html.parser import HTMLParser as _HTMLParser
 from typing import List, Optional, TypedDict, cast
 from typing_extensions import Literal
 from urllib.parse import urlencode
 
 import httpx
+from markdown_it import MarkdownIt as _MarkdownIt
 from pydantic import BaseModel, Field
 
 from pyopds2 import (
@@ -189,7 +192,7 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
             title=book.title or self.title or "Untitled",
             subtitle=book.subtitle,
             author=get_authors(),
-            description=book.description or self.description,
+            description=strip_markdown(book.description or self.description) if (book.description or self.description) else None,
             language=[lang for marc_lang in (book.language or []) if (lang := marc_language_to_iso_639_1(marc_lang))],
             # TODO: Use the edition-specific pagecount
             numberOfPages=self.number_of_pages_median,
@@ -346,6 +349,38 @@ def map_ol_format_to_mime(ol_format: Literal['web', 'pdf', 'epub', 'audio', 'dai
         'txt': 'text/plain',
     }
     return mapping.get(ol_format, 'application/octet-stream')
+
+
+class _HTMLStripper(_HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self._parts: list[str] = []
+
+    def handle_data(self, data: str):
+        self._parts.append(data)
+
+    def get_text(self) -> str:
+        return "".join(self._parts)
+
+
+_md = _MarkdownIt()
+
+
+def strip_markdown(text: str) -> str:
+    """Convert Markdown/HTML to plain text using markdown-it-py.
+
+    OpenLibrary descriptions may contain Markdown links, horizontal rules,
+    emphasis, headings, and occasional inline HTML.  This function strips
+    all of that to produce clean readable text suitable for OPDS 2.0
+    ``description`` fields.
+    """
+    html = _md.render(text)
+    stripper = _HTMLStripper()
+    stripper.feed(html)
+    result = stripper.get_text()
+    result = result.replace('\r\n', '\n')
+    result = _re.sub(r'\n{3,}', '\n\n', result)
+    return result.strip()
 
 
 def marc_language_to_iso_639_1(marc_code: str) -> Optional[str]:
@@ -732,6 +767,7 @@ class OpenLibraryDataProvider(DataProvider):
         sort: Optional[str] = None,
         mode: str = "everything",
         language: Optional[str] = None,
+        title: Optional[str] = None,
         total: Optional[int] = None,
         availability_counts: Optional[dict[str, int]] = None,
     ) -> list[dict]:
@@ -754,6 +790,9 @@ class OpenLibraryDataProvider(DataProvider):
                 This value is preserved in every facet href so that switching
                 availability mode keeps the current language selection, and
                 vice-versa.
+            title: Display title for the search results page (e.g. ``"Art"``).
+                Preserved in every facet href so switching facets keeps the
+                page title instead of falling back to "Search Results".
             total: Reserved for Sort links when re-enabled.
             availability_counts: ``{mode_value: item_count}`` per OPDS 2.0 §2.4.
         """
@@ -769,6 +808,8 @@ class OpenLibraryDataProvider(DataProvider):
                 params["mode"] = mode_val
             if lang_val:
                 params["language"] = lang_val
+            if title:
+                params["title"] = title
             return f"{base_url}/search?{urlencode(params)}"
 
         # Sort group is unplugged but preserved — re-enable by adding:
