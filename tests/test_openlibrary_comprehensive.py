@@ -1127,6 +1127,15 @@ class TestSearch:
         assert isinstance(result, DataProvider.SearchResponse)
 
     @patch("pyopds2_openlibrary.httpx.get")
+    def test_mode_everything_strips_existing_ebook_access_filter(self, mock_get):
+        response = MagicMock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {"numFound": 0, "docs": []}
+        mock_get.return_value = response
+        OpenLibraryDataProvider.search("cats ebook_access:public", facets={"mode": "everything"})
+        assert mock_get.call_args.kwargs["params"]["q"] == "cats"
+
+    @patch("pyopds2_openlibrary.httpx.get")
     def test_mode_ebooks_appends_filter(self, mock_get):
         response = MagicMock()
         response.raise_for_status.return_value = None

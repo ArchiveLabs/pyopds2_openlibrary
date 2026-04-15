@@ -725,6 +725,16 @@ class TestFacetCountsAndBuilder:
         parsed_buyable = parse_qs(urlparse(buyable_link["href"]).query)
         assert parsed_buyable.get("mode") == ["buyable"]
 
+    def test_build_facets_everything_strips_ebook_access_filter_from_query(self):
+        facets = build_facets(
+            base_url="https://example.org/opds",
+            query="cats ebook_access:public",
+            mode="everything",
+        )
+        all_link = next(l for l in facets[0]["links"] if l["title"] == "Everything")
+        parsed_all = parse_qs(urlparse(all_link["href"]).query)
+        assert parsed_all.get("query") == ["cats"]
+
 
 class TestSearchModeHandling:
     @staticmethod

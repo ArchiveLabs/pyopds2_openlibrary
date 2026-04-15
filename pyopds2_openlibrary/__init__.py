@@ -919,7 +919,13 @@ class OpenLibraryDataProvider(DataProvider):
             mode_val: str = mode,
             lang_val: Optional[str] = language,
         ) -> str:
-            params: dict[str, str] = {"query": query}
+            # Strip ebook_access filters from the query for "everything" mode
+            # so the facet link truly returns all results regardless of how
+            # the user arrived at the search page.
+            # Handles both simple values (ebook_access:public) and range
+            # queries (ebook_access:[borrowable TO *]).
+            q = _re.sub(r'\s*ebook_access:(?:\[[^\]]*\]|\S+)', '', query).strip() if mode_val == "everything" else query
+            params: dict[str, str] = {"query": q}
             if sort_val:
                 params["sort"] = sort_val
             if mode_val and mode_val != "everything":
@@ -1057,7 +1063,11 @@ class OpenLibraryDataProvider(DataProvider):
         else:
             mode = 'everything'
 
-        if mode == 'ebooks' and 'ebook_access:' not in internal_query:
+        # "Everything" means no ebook_access restriction — strip any filter
+        # that may have been baked into the query by navigation links.
+        if mode == 'everything':
+            internal_query = _re.sub(r'\s*ebook_access:(?:\[[^\]]*\]|\S+)', '', internal_query).strip()
+        elif mode == 'ebooks' and 'ebook_access:' not in internal_query:
             internal_query = f"{internal_query} ebook_access:[printdisabled TO *]"
         elif mode == 'open_access' and 'ebook_access:' not in internal_query:
             internal_query = f"{internal_query} ebook_access:public"
