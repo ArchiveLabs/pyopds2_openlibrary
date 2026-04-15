@@ -23,6 +23,7 @@ from pyopds2_openlibrary import (
     _parse_price_amount,
     _resolve_preferred_edition,
     fetch_languages_map,
+    iso_639_1_to_marc,
     map_ol_format_to_mime,
     marc_language_to_iso_639_1,
     ol_acquisition_to_opds_links,
@@ -665,6 +666,21 @@ class TestGetRetryLogic:
         assert marc_language_to_iso_639_1("fra") is None
 
     @patch("pyopds2_openlibrary.httpx.get")
+    def test_iso_639_1_to_marc_reverse_lookup(self, mock_get):
+        _reset_languages_map_cache()
+        openlibrary._iso_to_marc_cache.clear()
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        resp.json.return_value = [
+            {"key": "/languages/eng", "identifiers": {"iso_639_1": ["en"]}},
+            {"key": "/languages/fre", "identifiers": {"iso_639_1": ["fr"]}},
+        ]
+        mock_get.return_value = resp
+        assert iso_639_1_to_marc("en") == "eng"
+        assert iso_639_1_to_marc("fr") == "fre"
+        assert iso_639_1_to_marc("zz") is None
+
+    @patch("pyopds2_openlibrary.httpx.get")
     def test_languages_without_iso_639_1_skipped(self, mock_get):
         _reset_languages_map_cache()
         resp = MagicMock()
@@ -791,18 +807,12 @@ class TestFilterHelpers:
 
 
 class TestResolvePreferredEdition:
+    @patch("pyopds2_openlibrary.fetch_languages_map", return_value={"eng": "en", "fre": "fr"})
     @patch("pyopds2_openlibrary.httpx.get")
-    def test_returns_matching_edition(self, mock_get):
-        first = MagicMock()
-        first.raise_for_status.return_value = None
-        first.json.return_value = {
-            "entries": [
-                {"key": "/books/OL999M", "languages": [{"key": "/languages/eng"}]},
-            ]
-        }
-        second = MagicMock()
-        second.raise_for_status.return_value = None
-        second.json.return_value = {
+    def test_returns_matching_edition(self, mock_get, _):
+        single = MagicMock()
+        single.raise_for_status.return_value = None
+        single.json.return_value = {
             "docs": [
                 {
                     "author_name": ["Preferred Author"],
@@ -812,6 +822,7 @@ class TestResolvePreferredEdition:
                             {
                                 "key": "/books/OL999M",
                                 "title": "Preferred",
+                                "language": ["en"],
                                 "providers": [{"url": "https://example.org/book"}],
                             }
                         ]
@@ -819,47 +830,98 @@ class TestResolvePreferredEdition:
                 }
             ]
         }
-        mock_get.side_effect = [first, second]
+        mock_get.return_value = single
         resolved = _resolve_preferred_edition("/works/OL1W", "eng", ["key", "title", "providers"])
         assert resolved is not None
         assert resolved.edition.key == "/books/OL999M"
 
+    @patch("pyopds2_openlibrary.fetch_languages_map", return_value={"eng": "en", "fre": "fr"})
     @patch("pyopds2_openlibrary.httpx.get")
-    def test_returns_none_when_no_language_match(self, mock_get):
+    def test_returns_none_when_no_language_match(self, mock_get, _):
         first = MagicMock()
         first.raise_for_status.return_value = None
-        first.json.return_value = {
+        first.json.return_value = {"docs": []}
+        second = MagicMock()
+        second.raise_for_status.return_value = None
+        second.json.return_value = {
             "entries": [
                 {"key": "/books/OL999M", "languages": [{"key": "/languages/fra"}]},
             ]
         }
-        mock_get.return_value = first
+        mock_get.side_effect = [first, second]
         assert _resolve_preferred_edition("/works/OL1W", "eng", ["key"]) is None
 
     @patch("pyopds2_openlibrary.httpx.get", side_effect=Exception("boom"))
     def test_returns_none_on_http_failure(self, _):
         assert _resolve_preferred_edition("/works/OL1W", "eng", ["key"]) is None
 
+    @patch("pyopds2_openlibrary.fetch_languages_map", return_value={"eng": "en", "fre": "fr"})
     @patch("pyopds2_openlibrary.httpx.get")
-    def test_author_data_populated_from_preferred_edition_search(self, mock_get):
-        first = MagicMock()
-        first.raise_for_status.return_value = None
-        first.json.return_value = {"entries": [{"key": "/books/OL111M", "languages": [{"key": "/languages/eng"}]}]}
-        second = MagicMock()
-        second.raise_for_status.return_value = None
-        second.json.return_value = {
+    def test_author_data_populated_from_preferred_edition_search(self, mock_get, _):
+        single = MagicMock()
+        single.raise_for_status.return_value = None
+        single.json.return_value = {
             "docs": [
                 {
                     "author_name": ["Localized Name"],
                     "author_key": ["OLLOCAL"],
-                    "editions": {"docs": [{"key": "/books/OL111M", "title": "Localized", "cover_i": 123, "providers": [{"url": "https://x", "format": "epub"}]}]},
+                    "editions": {"docs": [{"key": "/books/OL111M", "title": "Localized", "cover_i": 123, "language": ["en"], "providers": [{"url": "https://x", "format": "epub"}]}]},
                 }
             ]
         }
-        mock_get.side_effect = [first, second]
+        mock_get.return_value = single
         resolved = _resolve_preferred_edition("/works/OL1W", "eng", ["key", "title", "providers"])
         assert resolved.author_name == ["Localized Name"]
         assert resolved.author_key == ["OLLOCAL"]
+
+    @patch("pyopds2_openlibrary.fetch_languages_map", return_value={"eng": "en", "fre": "fr"})
+    @patch("pyopds2_openlibrary.httpx.get")
+    def test_falls_back_to_two_call_strategy_when_single_call_mismatches(self, mock_get, _):
+        first = MagicMock()
+        first.raise_for_status.return_value = None
+        first.json.return_value = {
+            "docs": [
+                {
+                    "editions": {
+                        "docs": [
+                            {
+                                "key": "/books/OLFRA",
+                                "title": "French",
+                                "language": ["fr"],
+                                "providers": [{"url": "https://fr.example", "format": "epub"}],
+                            }
+                        ]
+                    },
+                }
+            ]
+        }
+        second = MagicMock()
+        second.raise_for_status.return_value = None
+        second.json.return_value = {"entries": [{"key": "/books/OLENG", "languages": [{"key": "/languages/eng"}]}]}
+        third = MagicMock()
+        third.raise_for_status.return_value = None
+        third.json.return_value = {
+            "docs": [
+                {
+                    "author_name": ["Fallback Author"],
+                    "author_key": ["OLFALL"],
+                    "editions": {
+                        "docs": [
+                            {
+                                "key": "/books/OLENG",
+                                "title": "English",
+                                "language": ["en"],
+                                "providers": [{"url": "https://en.example", "format": "epub"}],
+                            }
+                        ]
+                    },
+                }
+            ]
+        }
+        mock_get.side_effect = [first, second, third]
+        resolved = _resolve_preferred_edition("/works/OL1W", "eng", ["key", "title", "providers"])
+        assert resolved is not None
+        assert resolved.edition.key == "/books/OLENG"
 
 
 class TestAvailabilityFacetPrimitive:
@@ -1165,8 +1227,9 @@ class TestSearch:
         result = OpenLibraryDataProvider.search("cats", facets={"mode": mode})
         assert [r.title for r in result.records][:2] == ["Available", "Unavailable"]
 
+    @patch("pyopds2_openlibrary.fetch_languages_map", return_value={"eng": "en", "fre": "fr"})
     @patch("pyopds2_openlibrary.httpx.get")
-    def test_language_matched_editions_moved_first(self, mock_get):
+    def test_language_matched_editions_moved_first(self, mock_get, _):
         response = MagicMock()
         response.raise_for_status.return_value = None
         response.json.return_value = {
@@ -1200,9 +1263,10 @@ class TestSearch:
         result = OpenLibraryDataProvider.search("cats", language="eng")
         assert result.records[0].editions.docs[0].key == "/books/OLENG"
 
+    @patch("pyopds2_openlibrary.fetch_languages_map", return_value={"eng": "en", "fre": "fr"})
     @patch("pyopds2_openlibrary._resolve_preferred_edition")
     @patch("pyopds2_openlibrary.httpx.get")
-    def test_edition_key_query_substitutes_foreign_language_edition(self, mock_get, mock_resolve):
+    def test_edition_key_query_substitutes_foreign_language_edition(self, mock_get, mock_resolve, _):
         response = MagicMock()
         response.raise_for_status.return_value = None
         response.json.return_value = {
@@ -1218,7 +1282,7 @@ class TestSearch:
                             "key": "/books/OLFRA",
                             "title": "French",
                             "cover_i": 123,
-                            "language": ["fre"],
+                            "language": ["fr"],
                             "providers": [{"url": "https://example.org/fr", "format": "epub"}],
                         }
                     ],
@@ -1232,7 +1296,7 @@ class TestSearch:
                     "key": "/books/OLENG",
                     "title": "English",
                     "cover_i": 123,
-                    "language": ["eng"],
+                    "language": ["en"],
                     "providers": [{"url": "https://example.org/en", "format": "epub"}],
                 }
             ),
@@ -1240,9 +1304,36 @@ class TestSearch:
             author_key=["OLAUTH"],
         )
 
-        result = OpenLibraryDataProvider.search("edition_key:OLFRA", language="eng")
+        result = OpenLibraryDataProvider.search("edition_key:OLFRA", language="en")
         assert result.records[0].editions.docs[0].key == "/books/OLENG"
         assert result.records[0].author_name == ["Localized Author"]
+
+    @patch("pyopds2_openlibrary.httpx.get")
+    def test_require_cover_false_keeps_results_without_cover(self, mock_get):
+        no_cover_doc = self._search_doc(
+            "/works/OLNOCOVER",
+            "No Cover",
+            "9.99 USD",
+            "borrow_available",
+            editions_docs=[
+                {
+                    "key": "/books/OLNOCOVERM",
+                    "title": "No Cover",
+                    "cover_i": None,
+                    "providers": [{"url": "https://example.org/en", "format": "epub"}],
+                }
+            ],
+        )
+        no_cover_doc["cover_i"] = None
+        response = MagicMock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {
+            "numFound": 1,
+            "docs": [no_cover_doc],
+        }
+        mock_get.return_value = response
+        result = OpenLibraryDataProvider.search("cats", require_cover=False)
+        assert len(result.records) == 1
 
     @patch("pyopds2_openlibrary.httpx.get")
     def test_title_parameter_propagates_to_response_title(self, mock_get):

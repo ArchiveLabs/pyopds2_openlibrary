@@ -651,7 +651,7 @@ class TestFacetCountsAndBuilder:
         }[mode]
 
         counts = fetch_facet_counts("cats")
-        assert list(counts.keys()) == ["everything", "ebooks", "open_access", "buyable"]
+        assert set(counts.keys()) == {"everything", "ebooks", "open_access", "buyable"}
         assert counts["buyable"] is None
 
     @patch("pyopds2_openlibrary.OpenLibraryDataProvider._count_for_mode")

@@ -432,6 +432,25 @@ def fetch_languages_map() -> dict[str, str]:
     return languages
 
 
+_iso_to_marc_cache: dict[str, str] = {}
+
+
+def iso_639_1_to_marc(iso_code: str) -> Optional[str]:
+    """Convert an ISO 639-1 code (e.g. 'en') to a MARC language code (e.g. 'eng').
+
+    Uses a reverse-lookup cache built from ``fetch_languages_map()`` to avoid
+    a linear scan on every call.  Returns ``None`` if no mapping is found.
+    """
+    if iso_code in _iso_to_marc_cache:
+        return _iso_to_marc_cache[iso_code]
+    lang_map = fetch_languages_map()  # MARC → ISO
+    # Rebuild reverse cache from the latest map.
+    _iso_to_marc_cache.clear()
+    for marc, iso in lang_map.items():
+        _iso_to_marc_cache[iso] = marc
+    return _iso_to_marc_cache.get(iso_code)
+
+
 def _has_acquisition_options(record: OpenLibraryDataRecord) -> bool:
     """Check if a record's edition would produce at least one usable OPDS link.
 
@@ -548,37 +567,69 @@ class _ResolvedEdition(typing.NamedTuple):
 
 def _resolve_preferred_edition(
     work_key: str,
-    language: str,
+    marc_language: str,
     edition_fields: list[str],
 ) -> Optional["_ResolvedEdition"]:
     """Find a full EditionDoc for *work_key* in the preferred MARC language code.
 
-    Makes up to two requests:
-    1. Work editions endpoint to find an edition key matching *language*.
-    2. Search endpoint to get the full edition data (providers, availability, etc.).
+    Uses a single search call with ``language:<marc>`` + ``lang=<iso>`` so
+    OL returns the work with the preferred-language edition directly.
+
+    Falls back to the two-request approach (editions endpoint → search by
+    edition key) if the single-call result doesn't match, ensuring backward
+    compatibility with older OL API behaviour.
 
     Returns a ``_ResolvedEdition`` namedtuple (edition + author data) or
     ``None`` if no matching edition is found or any request fails.
     """
+    # work_key is like "/works/OL123W" — extract the OLID for a key: query.
+    work_olid = work_key.split("/")[-1]
+    iso_lang = fetch_languages_map().get(marc_language)
+    search_fields = "editions,author_name,author_key," + ",".join(edition_fields)
+
     try:
+        # Single-call approach: search by work key with language filter.
         r = _get(
+            f"{OpenLibraryDataProvider.BASE_URL}/search.json",
+            params={
+                "q": f"key:/works/{work_olid} language:{marc_language}",
+                "editions": "true",
+                **({'lang': iso_lang} if iso_lang else {}),
+                "fields": search_fields,
+                "limit": 1,
+            },
+        )
+        docs = r.json().get("docs", [])
+        if docs:
+            edition_docs = docs[0].get("editions", {}).get("docs", [])
+            if edition_docs:
+                ed = OpenLibraryDataRecord.EditionDoc.model_validate(edition_docs[0])
+                # Verify the returned edition actually matches the language.
+                if ed.language and iso_lang and iso_lang in ed.language:
+                    return _ResolvedEdition(
+                        edition=ed,
+                        author_name=docs[0].get("author_name") or None,
+                        author_key=docs[0].get("author_key") or None,
+                    )
+
+        # Fallback: editions endpoint → search by edition key (2 requests).
+        # Handles cases where the single-call approach returns a mismatched
+        # edition or OL's lang param doesn't produce the expected result.
+        r2 = _get(
             f"{OpenLibraryDataProvider.BASE_URL}{work_key}/editions.json",
             params={"limit": 50, "fields": "key,languages"},
         )
         preferred_olid: Optional[str] = None
-        for entry in r.json().get("entries", []):
+        for entry in r2.json().get("entries", []):
             langs = [lang["key"].split("/")[-1] for lang in entry.get("languages", [])]
-            if language in langs:
-                # entry["key"] is like "/books/OL27945116M"
+            if marc_language in langs:
                 preferred_olid = entry["key"].split("/")[-1]
                 break
 
         if not preferred_olid:
             return None
 
-        # Include author fields so we can fix author name for the preferred edition.
-        search_fields = "editions,author_name,author_key," + ",".join(edition_fields)
-        r2 = _get(
+        r3 = _get(
             f"{OpenLibraryDataProvider.BASE_URL}/search.json",
             params={
                 "q": f"edition_key:{preferred_olid}",
@@ -587,18 +638,68 @@ def _resolve_preferred_edition(
                 "limit": 1,
             },
         )
-        docs = r2.json().get("docs", [])
+        docs = r3.json().get("docs", [])
         if not docs:
             return None
         edition_docs = docs[0].get("editions", {}).get("docs", [])
         if not edition_docs:
             return None
         edition = OpenLibraryDataRecord.EditionDoc.model_validate(edition_docs[0])
-        author_name = docs[0].get("author_name") or None
-        author_key = docs[0].get("author_key") or None
-        return _ResolvedEdition(edition=edition, author_name=author_name, author_key=author_key)
+        return _ResolvedEdition(
+            edition=edition,
+            author_name=docs[0].get("author_name") or None,
+            author_key=docs[0].get("author_key") or None,
+        )
     except Exception:
         return None
+
+
+_EDITION_RESOLVE_FIELDS = [
+    "key", "title", "subtitle", "description", "cover_i",
+    "ebook_access", "language", "ia", "availability", "providers",
+]
+
+
+def _align_editions_to_language(
+    records: list[OpenLibraryDataRecord],
+    language: str,
+    resolve_mismatched: bool = False,
+) -> list[OpenLibraryDataRecord]:
+    """Reorder or resolve editions so the first one matches *language* (ISO 639-1).
+
+    - Multiple editions: move language-matching ones to the front (free).
+    - Single mismatched edition: when *resolve_mismatched* is ``True``,
+      call ``_resolve_preferred_edition`` (2 HTTP requests per record).
+      This is expensive and should only be used for targeted queries
+      (e.g. ``edition_key:``).  For general searches the Solr
+      ``language:`` filter + ``lang`` param already ensure the right
+      edition in almost all cases.
+    """
+    marc_lang: Optional[str] = None
+    if resolve_mismatched:
+        marc_lang = iso_639_1_to_marc(language)
+    for record in records:
+        if not (record.editions and record.editions.docs):
+            continue
+        if len(record.editions.docs) > 1:
+            matched = [d for d in record.editions.docs if d.language and language in d.language]
+            others = [d for d in record.editions.docs if not (d.language and language in d.language)]
+            if matched:
+                record.editions.docs = matched + others
+        elif resolve_mismatched:
+            ed = record.editions.docs[0]
+            if not ed.language or language not in ed.language:
+                if marc_lang and record.key:
+                    preferred = _resolve_preferred_edition(
+                        record.key, marc_lang, _EDITION_RESOLVE_FIELDS
+                    )
+                    if preferred:
+                        record.editions.docs[0] = preferred.edition
+                        if preferred.author_name:
+                            record.author_name = preferred.author_name
+                        if preferred.author_key:
+                            record.author_key = preferred.author_key
+    return records
 
 
 # ---------------------------------------------------------------------------
@@ -619,6 +720,9 @@ _AVAILABILITY_MODES: list[tuple[str, str]] = [
 _LANGUAGE_OPTIONS: list[tuple[Optional[str], str]] = [
     (None, "All"),
     ("en", "English"),
+    ("es", "Spanish"),
+    ("fr", "French"),
+    ("hi", "Hindi"),
 ]
 
 
@@ -750,14 +854,28 @@ class OpenLibraryDataProvider(DataProvider):
 
         Modes that cannot be counted server-side (e.g. ``buyable``) will have
         a ``None`` value unless supplied via *known_mode*/*known_total*.
+
+        Count requests run in parallel using a thread pool for speed.
         """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
         modes = ["everything", "ebooks", "open_access", "buyable"]
         counts: dict[str, Optional[int]] = {}
+        to_fetch: list[str] = []
         for m in modes:
             if known_mode and m == known_mode and known_total is not None:
                 counts[m] = known_total
+            elif m == "buyable":
+                counts[m] = None
             else:
-                counts[m] = OpenLibraryDataProvider._count_for_mode(query, m)
+                to_fetch.append(m)
+
+        if to_fetch:
+            with ThreadPoolExecutor(max_workers=len(to_fetch)) as pool:
+                futures = {pool.submit(OpenLibraryDataProvider._count_for_mode, query, m): m for m in to_fetch}
+                for future in as_completed(futures):
+                    counts[futures[future]] = future.result()
+
         return counts
 
     @staticmethod
@@ -896,6 +1014,7 @@ class OpenLibraryDataProvider(DataProvider):
         facets: Optional[dict[str, str]] = None,
         language: Optional[str] = None,
         title: Optional[str] = None,
+        require_cover: bool = True,
     ) -> DataProvider.SearchResponse:
         """
         Search Open Library.
@@ -945,6 +1064,14 @@ class OpenLibraryDataProvider(DataProvider):
         elif mode == 'buyable' and 'ebook_access:' not in internal_query:
             internal_query = f"{internal_query} ebook_access:[printdisabled TO *]"
 
+        # When a language filter is active, add language:<MARC> to the Solr
+        # query so non-matching works are excluded (the `lang` param only
+        # influences edition preference / ranking, it does not filter).
+        if language and 'language:' not in internal_query:
+            marc = iso_639_1_to_marc(language)
+            if marc:
+                internal_query = f"{internal_query} language:{marc}"
+
         params = {
             "editions": "true",
             "q": internal_query,
@@ -952,8 +1079,7 @@ class OpenLibraryDataProvider(DataProvider):
             "limit": limit,
             **({'sort': sort} if sort else {}),
             "fields": ",".join(fields),
-            # Ask OL to prefer editions in the requested language.
-            # This works for general queries but is ignored when edition_key: is present.
+            # Also pass lang to prefer editions in the requested language.
             **({'lang': language} if language else {}),
         }
         r = _get(f"{OpenLibraryDataProvider.BASE_URL}/search.json", params=params)
@@ -969,48 +1095,25 @@ class OpenLibraryDataProvider(DataProvider):
 
         total = data.get("numFound", 0)
 
-        # When the query targets a specific edition (edition_key:), OL ignores the
-        # lang param and always returns that edition.  If its language doesn't match
-        # the preference, resolve the correct edition from the work.
-        if language and "edition_key:" in query:
-            edition_fields = [
-                "key", "title", "subtitle", "description", "cover_i",
-                "ebook_access", "language", "ia", "availability", "providers",
-            ]
-            for record in records:
-                if record.editions and record.editions.docs:
-                    ed = record.editions.docs[0]
-                    if not ed.language or language not in ed.language:
-                        preferred = _resolve_preferred_edition(
-                            record.key or "", language, edition_fields
-                        )
-                        # Always prefer the language-matched edition over a foreign-language
-                        # one, even if its ebook-access rank is lower. Language
-                        # correctness takes priority; the user can still follow
-                        # the alternate link to the original edition.
-                        if preferred:
-                            record.editions.docs[0] = preferred.edition
-                            # Fix author name/key if the edition-level search
-                            # returned localised author data.
-                            if preferred.author_name:
-                                record.author_name = preferred.author_name
-                            if preferred.author_key:
-                                record.author_key = preferred.author_key
-
-        # When OL returns multiple editions, move language-matching ones first
-        # (fallback for cases where lang param alone isn't sufficient).
+        # Ensure the displayed edition matches the selected language.
+        # - Multiple editions: reorder so language-matching ones come first.
+        # - Single mismatched edition: resolve the preferred edition from OL.
+        # This also handles edition_key: queries where OL ignores the lang param.
         if language:
-            for record in records:
-                if record.editions and record.editions.docs and len(record.editions.docs) > 1:
-                    matched = [d for d in record.editions.docs if d.language and language in d.language]
-                    others = [d for d in record.editions.docs if not (d.language and language in d.language)]
-                    if matched:
-                        record.editions.docs = matched + others
+            records = _align_editions_to_language(
+                records, language,
+                resolve_mismatched="edition_key:" in query,
+            )
 
-        # Always filter out records with no usable OPDS links or no cover image.
-        # - No acquisition options: the user has nothing to tap in the reader app.
-        # - No cover: produces a broken "Cover Unavailable" card that degrades UX.
-        records = [r for r in records if _has_acquisition_options(r) and _has_cover(r)]
+        # Always filter out records with no usable OPDS links.
+        # When require_cover is True (homepage groups, navigation), also
+        # filter out records without a cover image or description to avoid
+        # broken "Cover Unavailable" cards.  Search results keep these so
+        # users can find all available books.
+        if require_cover:
+            records = [r for r in records if _has_acquisition_options(r) and _has_cover(r)]
+        else:
+            records = [r for r in records if _has_acquisition_options(r)]
 
         if mode in ('ebooks', 'open_access', 'buyable'):
             if mode == 'buyable':
