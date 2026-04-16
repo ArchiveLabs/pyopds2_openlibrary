@@ -1,1 +1,2 @@
 pip install git+https://github.com/ArchiveLabs/pyopds2.git
+markdown-it-py>=3.0.0
