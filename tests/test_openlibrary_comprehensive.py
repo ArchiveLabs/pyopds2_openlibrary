@@ -1031,6 +1031,134 @@ class TestFacetBuilders:
         assert everything["href"] == "https://example.org/opds/"
 
 
+class TestHomeFeed:
+    def test_home_page_href_builds_expected_params(self):
+        assert OpenLibraryDataProvider._home_page_href("https://example.org/opds", "everything", None, 1) == "https://example.org/opds/"
+        assert OpenLibraryDataProvider._home_page_href("https://example.org/opds", "open_access", "en", 3) == (
+            "https://example.org/opds/?mode=open_access&language=en&page=3"
+        )
+
+    def test_home_groups_config_uses_mode_filter(self):
+        everything_groups = OpenLibraryDataProvider._home_groups_config("everything")
+        open_access_groups = OpenLibraryDataProvider._home_groups_config("open_access")
+        assert any("ebook_access:[borrowable TO *]" in query for _, query, _ in everything_groups)
+        assert any("ebook_access:public" in query for _, query, _ in open_access_groups)
+
+    @patch("pyopds2_openlibrary.OpenLibraryDataProvider.search")
+    @patch("pyopds2_openlibrary.Catalog")
+    def test_build_home_feed_page_one_has_navigation_facets_and_next(self, mock_catalog_cls, mock_search):
+        class _FakeCatalog:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+                self.publications = kwargs.get("publications", [])
+
+            @staticmethod
+            def create(*args, **kwargs):
+                return _FakeCatalog(metadata={"title": "Group"}, publications=[{"metadata": {"title": "Book"}}])
+
+            def model_dump(self):
+                return self.kwargs
+
+        mock_catalog_cls.side_effect = lambda **kwargs: _FakeCatalog(**kwargs)
+        mock_catalog_cls.create.side_effect = _FakeCatalog.create
+        mock_search.return_value = object()
+
+        featured_subjects = [
+            {"presentable_name": "Art", "key": "/subjects/art"},
+            {"presentable_name": "Custom", "query": 'publisher:"Custom" ebook_access:public'},
+        ]
+
+        feed = OpenLibraryDataProvider.build_home_feed(
+            base="https://example.org/opds",
+            mode="everything",
+            language="en",
+            page=1,
+            featured_subjects=featured_subjects,
+        )
+
+        links_by_rel = {link.rel: link for link in feed["links"]}
+        assert links_by_rel["self"].href == "https://example.org/opds/?language=en"
+        assert links_by_rel["start"].href == "https://example.org/opds/"
+        assert links_by_rel["next"].href == "https://example.org/opds/?language=en&page=2"
+        assert "previous" not in links_by_rel
+
+        assert len(feed["groups"]) == OpenLibraryDataProvider.GROUPS_PER_PAGE
+        assert len(feed["facets"]) == 2
+        assert len(feed["navigation"]) == 2
+
+        first_nav_qs = parse_qs(urlparse(feed["navigation"][0].href).query)
+        assert first_nav_qs["title"] == ["Art"]
+        assert first_nav_qs["language"] == ["en"]
+        assert first_nav_qs["query"] == ['subject_key:art -subject:"content_warning:cover" ebook_access:[borrowable TO *]']
+
+        second_nav_qs = parse_qs(urlparse(feed["navigation"][1].href).query)
+        assert second_nav_qs["query"] == ['publisher:"Custom" ebook_access:public']
+
+        called_titles = {call.kwargs["title"] for call in mock_search.call_args_list}
+        expected_titles = {title for title, _, _ in OpenLibraryDataProvider._home_groups_config("everything")[:3]}
+        assert called_titles == expected_titles
+
+    @patch("pyopds2_openlibrary.OpenLibraryDataProvider.search")
+    @patch("pyopds2_openlibrary.Catalog")
+    def test_build_home_feed_non_first_page_has_previous_no_navigation_or_facets(self, mock_catalog_cls, mock_search):
+        class _FakeCatalog:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+                self.publications = kwargs.get("publications", [])
+
+            @staticmethod
+            def create(*args, **kwargs):
+                return _FakeCatalog(metadata={"title": "Group"}, publications=[{"metadata": {"title": "Book"}}])
+
+            def model_dump(self):
+                return self.kwargs
+
+        mock_catalog_cls.side_effect = lambda **kwargs: _FakeCatalog(**kwargs)
+        mock_catalog_cls.create.side_effect = _FakeCatalog.create
+        mock_search.return_value = object()
+
+        feed = OpenLibraryDataProvider.build_home_feed(
+            base="https://example.org/opds",
+            mode="everything",
+            language=None,
+            page=2,
+        )
+
+        links_by_rel = {link.rel: link for link in feed["links"]}
+        assert links_by_rel["self"].href == "https://example.org/opds/?page=2"
+        assert links_by_rel["next"].href == "https://example.org/opds/?page=3"
+        assert links_by_rel["previous"].href == "https://example.org/opds/"
+        assert feed["navigation"] == []
+        assert feed["facets"] == []
+
+    @patch("pyopds2_openlibrary.OpenLibraryDataProvider.search")
+    @patch("pyopds2_openlibrary.Catalog")
+    def test_build_home_feed_skips_failed_group_fetches(self, mock_catalog_cls, mock_search):
+        class _FakeCatalog:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+                self.publications = kwargs.get("publications", [])
+
+            @staticmethod
+            def create(*args, **kwargs):
+                return _FakeCatalog(metadata={"title": "Group"}, publications=[{"metadata": {"title": "Book"}}])
+
+            def model_dump(self):
+                return self.kwargs
+
+        mock_catalog_cls.side_effect = lambda **kwargs: _FakeCatalog(**kwargs)
+        mock_catalog_cls.create.side_effect = _FakeCatalog.create
+        mock_search.side_effect = [object(), Exception("boom"), object()]
+
+        feed = OpenLibraryDataProvider.build_home_feed(
+            base="https://example.org/opds",
+            mode="everything",
+            page=1,
+        )
+
+        assert len(feed["groups"]) == 2
+
+
 class TestFacetCounts:
     @patch("pyopds2_openlibrary.httpx.get")
     def test_count_fetch_returns_all_modes(self, mock_get):

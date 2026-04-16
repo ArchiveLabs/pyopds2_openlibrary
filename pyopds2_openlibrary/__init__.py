@@ -11,10 +11,12 @@ from markdown_it import MarkdownIt as _MarkdownIt
 from pydantic import BaseModel, Field
 
 from pyopds2 import (
+    Catalog,
     DataProvider,
     DataProviderRecord,
     Contributor,
     Metadata,
+    Navigation,
     Link
 )
 
@@ -1009,6 +1011,204 @@ class OpenLibraryDataProvider(DataProvider):
                 ),
             },
         ]
+
+    # -- Homepage group definitions & pagination ---------------------------
+
+    GROUPS_PER_PAGE: int = 3
+
+    OPDS_MEDIA_TYPE: str = "application/opds+json"
+
+    FEATURED_SUBJECTS: list[dict[str, str]] = [
+        {"key": "/subjects/art",                           "presentable_name": "Art"},
+        {"key": "/subjects/science_fiction",               "presentable_name": "Science Fiction"},
+        {"key": "/subjects/fantasy",                       "presentable_name": "Fantasy"},
+        {"key": "/subjects/biographies",                   "presentable_name": "Biographies"},
+        {"key": "/subjects/recipes",                       "presentable_name": "Recipes"},
+        {"key": "/subjects/romance",                       "presentable_name": "Romance"},
+        {"key": "/subjects/textbooks",                     "presentable_name": "Textbooks"},
+        {"key": "/subjects/children",                      "presentable_name": "Children"},
+        {"key": "/subjects/history",                       "presentable_name": "History"},
+        {"key": "/subjects/medicine",                      "presentable_name": "Medicine"},
+        {"key": "/subjects/religion",                      "presentable_name": "Religion"},
+        {"key": "/subjects/mystery_and_detective_stories", "presentable_name": "Mystery and Detective Stories"},
+        {"key": "/subjects/plays",                         "presentable_name": "Plays"},
+        {"key": "/subjects/music",                         "presentable_name": "Music"},
+        {"key": "/subjects/science",                       "presentable_name": "Science"},
+        {"presentable_name": "Standard Ebooks",            "query": 'publisher:"Standard Ebooks" ebook_access:public'},
+    ]
+
+    @staticmethod
+    def _home_groups_config(mode: str = "everything") -> list[tuple[str, str, str]]:
+        """Return the full list of homepage group definitions.
+
+        Each entry is ``(title, solr_query, sort)``.  The *mode* parameter
+        controls the ``ebook_access`` filter baked into each query.
+        """
+        ea = "ebook_access:public" if mode == "open_access" else "ebook_access:[borrowable TO *]"
+        return [
+            (
+                "Trending Books",
+                f'trending_score_hourly_sum:[1 TO *] -subject:"content_warning:cover" {ea} readinglog_count:[4 TO *]',
+                "trending",
+            ),
+            (
+                "Classic Books",
+                'ddc:8* first_publish_year:[* TO 1950] publish_year:[2000 TO *] NOT public_scan_b:false -subject:"content_warning:cover"',
+                "trending",
+            ),
+            (
+                "Romance",
+                f'subject:romance {ea} first_publish_year:[1930 TO *] trending_score_hourly_sum:[1 TO *] -subject:"content_warning:cover"',
+                "trending,trending_score_hourly_sum",
+            ),
+            (
+                "Kids",
+                f'{ea} trending_score_hourly_sum:[1 TO *] (subject_key:(juvenile_audience OR children\'s_fiction OR juvenile_nonfiction OR juvenile_encyclopedias OR juvenile_riddles OR juvenile_poetry OR juvenile_wit_and_humor OR juvenile_limericks OR juvenile_dictionaries OR juvenile_non-fiction) OR subject:("Juvenile literature" OR "Juvenile fiction" OR "pour la jeunesse" OR "pour enfants"))',
+                "random.hourly",
+            ),
+            (
+                "Thrillers",
+                f'subject:thrillers {ea} trending_score_hourly_sum:[1 TO *] -subject:"content_warning:cover"',
+                "trending,trending_score_hourly_sum",
+            ),
+            (
+                "Textbooks",
+                f'subject_key:textbooks publish_year:[1990 TO *] {ea}',
+                "trending",
+            ),
+            (
+                "Standard Ebooks",
+                'publisher:"Standard Ebooks" ebook_access:public',
+                "random.hourly",
+            ),
+        ]
+
+    @staticmethod
+    def _home_page_href(
+        base: str, mode: str, language: Optional[str], page: int,
+    ) -> str:
+        """Build a homepage href with pagination."""
+        params: dict[str, str] = {}
+        if mode != "everything":
+            params["mode"] = mode
+        if language:
+            params["language"] = language
+        if page > 1:
+            params["page"] = str(page)
+        return f"{base}/?{urlencode(params)}" if params else f"{base}/"
+
+    @classmethod
+    def build_home_feed(
+        cls,
+        base: str,
+        mode: str = "everything",
+        language: Optional[str] = None,
+        page: int = 1,
+        featured_subjects: Optional[list[dict[str, str]]] = None,
+    ) -> dict:
+        """Build a complete OPDS 2.0 homepage catalog dict.
+
+        Fetches the current page's batch of groups from Open Library,
+        builds navigation (page 1 only), facets (page 1 only), and
+        pagination links (``next`` / ``previous``).
+
+        Args:
+            base: OPDS base URL (no trailing slash).
+            mode: Availability filter (``everything``, ``ebooks``,
+                ``open_access``, ``buyable``).
+            language: BCP 47 language code or ``None`` for all.
+            page: 1-based page number for group pagination.
+            featured_subjects: Override the default ``FEATURED_SUBJECTS``
+                list.  Each entry needs ``presentable_name`` and either
+                ``key`` or ``query``.
+
+        Returns:
+            A dict ready to be serialised as JSON (via ``Catalog.model_dump``).
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        subjects = featured_subjects if featured_subjects is not None else cls.FEATURED_SUBJECTS
+        media = cls.OPDS_MEDIA_TYPE
+        search_url = cls.SEARCH_URL
+        all_groups = cls._home_groups_config(mode)
+
+        # Paginate
+        per_page = cls.GROUPS_PER_PAGE
+        start = (page - 1) * per_page
+        page_groups = all_groups[start : start + per_page]
+        has_next = start + per_page < len(all_groups)
+
+        # Fetch groups in parallel
+        def fetch_one(title: str, query: str, sort: str) -> Optional[Catalog]:
+            try:
+                resp = cls.search(
+                    query=query, sort=sort, limit=25,
+                    language=language, facets={"mode": mode}, title=title,
+                )
+                return Catalog.create(metadata=Metadata(title=title), response=resp)
+            except Exception:
+                return None
+
+        loaded_groups: list[Catalog] = []
+        if page_groups:
+            with ThreadPoolExecutor(max_workers=len(page_groups)) as pool:
+                futures = {
+                    pool.submit(fetch_one, t, q, s): i
+                    for i, (t, q, s) in enumerate(page_groups)
+                }
+                results: list[Optional[Catalog]] = [None] * len(page_groups)
+                for future in as_completed(futures):
+                    results[futures[future]] = future.result()
+
+            loaded_groups = [
+                g for g in results
+                if g is not None and g.publications
+            ]
+
+        # Navigation — only on page 1 when groups loaded
+        navigation: list[Navigation] = []
+        if page == 1 and loaded_groups:
+            for subject in subjects:
+                q = subject.get("query") or (
+                    f'subject_key:{subject["key"].split("/")[-1]}'
+                    f' -subject:"content_warning:cover"'
+                    f' ebook_access:[borrowable TO *]'
+                )
+                nav_params: dict[str, str] = {
+                    "sort": "trending",
+                    "title": subject["presentable_name"],
+                    "query": q,
+                }
+                if language:
+                    nav_params["language"] = language
+                navigation.append(Navigation(
+                    type=media,
+                    title=subject["presentable_name"],
+                    href=f"{search_url}?{urlencode(nav_params)}",
+                ))
+
+        # Links
+        links = [
+            Link(rel="self", href=cls._home_page_href(base, mode, language, page), type=media),
+            Link(rel="start", href=f"{base}/", type=media),
+            Link(rel="search", href=f"{base}/search{{?query}}", type=media, templated=True),
+            cls.bookshelf_link(),
+            cls.profile_link(),
+        ]
+        if has_next:
+            links.append(Link(rel="next", href=cls._home_page_href(base, mode, language, page + 1), type=media))
+        if page > 1:
+            links.append(Link(rel="previous", href=cls._home_page_href(base, mode, language, page - 1), type=media))
+
+        catalog = Catalog(
+            metadata=Metadata(title="Open Library"),
+            publications=[],
+            navigation=navigation,
+            groups=loaded_groups,
+            facets=cls.build_home_facets(base, mode, language) if page == 1 else [],
+            links=links,
+        )
+        return catalog.model_dump()
 
     @typing.override
     @staticmethod
