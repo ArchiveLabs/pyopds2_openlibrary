@@ -1169,11 +1169,13 @@ class OpenLibraryDataProvider(DataProvider):
         navigation: list[Navigation] = []
         if page == 1 and loaded_groups:
             for subject in subjects:
-                q = subject.get("query") or (
-                    f'subject_key:{subject["key"].split("/")[-1]}'
-                    f' -subject:"content_warning:cover"'
-                    f' ebook_access:[borrowable TO *]'
-                )
+                if subject.get("query"):
+                    q = subject["query"]
+                else:
+                    q = (
+                        f'subject_key:{subject["key"].split("/")[-1]}'
+                        f' -subject:"content_warning:cover"'
+                    )
                 nav_params: dict[str, str] = {
                     "sort": "trending",
                     "title": subject["presentable_name"],
@@ -1181,6 +1183,8 @@ class OpenLibraryDataProvider(DataProvider):
                 }
                 if language:
                     nav_params["language"] = language
+                if mode != "everything":
+                    nav_params["mode"] = mode
                 navigation.append(Navigation(
                     type=media,
                     title=subject["presentable_name"],
@@ -1377,6 +1381,8 @@ class OpenLibraryDataProvider(DataProvider):
                 **({"sort": sort} if sort else {}),
                 "title": title,
             }
+            if mode != "everything":
+                base_params["mode"] = mode
             if resp.page > 1:
                 base_params["page"] = str(resp.page)
             resp.params = base_params
