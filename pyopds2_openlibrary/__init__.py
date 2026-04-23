@@ -763,6 +763,7 @@ def _build_availability_links(
         }
         if val == mode:
             link["rel"] = "self"
+            link.setdefault("properties", {})["active"] = True
         count = counts.get(val)
         if count is not None:
             link.setdefault("properties", {})["numberOfItems"] = count
@@ -797,6 +798,7 @@ def _build_language_links(
         }
         if lang_code == language:
             link["rel"] = "self"
+            link.setdefault("properties", {})["active"] = True
         links.append(link)
     return links
 
@@ -1169,13 +1171,11 @@ class OpenLibraryDataProvider(DataProvider):
         navigation: list[Navigation] = []
         if page == 1 and loaded_groups:
             for subject in subjects:
-                if subject.get("query"):
-                    q = subject["query"]
-                else:
-                    q = (
-                        f'subject_key:{subject["key"].split("/")[-1]}'
-                        f' -subject:"content_warning:cover"'
-                    )
+                q = subject.get("query") or (
+                    f'subject_key:{subject["key"].split("/")[-1]}'
+                    f' -subject:"content_warning:cover"'
+                    f' ebook_access:[borrowable TO *]'
+                )
                 nav_params: dict[str, str] = {
                     "sort": "trending",
                     "title": subject["presentable_name"],
@@ -1183,8 +1183,6 @@ class OpenLibraryDataProvider(DataProvider):
                 }
                 if language:
                     nav_params["language"] = language
-                if mode != "everything":
-                    nav_params["mode"] = mode
                 navigation.append(Navigation(
                     type=media,
                     title=subject["presentable_name"],
@@ -1381,8 +1379,6 @@ class OpenLibraryDataProvider(DataProvider):
                 **({"sort": sort} if sort else {}),
                 "title": title,
             }
-            if mode != "everything":
-                base_params["mode"] = mode
             if resp.page > 1:
                 base_params["page"] = str(resp.page)
             resp.params = base_params
