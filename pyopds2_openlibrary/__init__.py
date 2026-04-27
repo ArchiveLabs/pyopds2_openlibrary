@@ -200,7 +200,7 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
             title=book.title or self.title or "Untitled",
             subtitle=book.subtitle,
             author=get_authors(),
-            description=strip_markdown(book.description or self.description) if (book.description or self.description) else None,
+            description=strip_markdown(book.description) if book.description else None,
             language=[lang for marc_lang in (book.language or []) if (lang := marc_language_to_iso_639_1(marc_lang))],
             # TODO: Use the edition-specific pagecount
             numberOfPages=self.number_of_pages_median,
@@ -1647,6 +1647,7 @@ class OpenLibraryDataProvider(DataProvider):
                     if not _is_latin_name(name) and key not in _latin_author_cache and key not in olid_to_nonlatin:
                         olid_to_nonlatin[key] = name
         if olid_to_nonlatin:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
             with ThreadPoolExecutor(max_workers=min(len(olid_to_nonlatin), 4)) as pool:
                 futures = {pool.submit(_latin_name_for_author, olid, name): olid for olid, name in olid_to_nonlatin.items()}
                 for future in as_completed(futures):

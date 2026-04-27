@@ -565,6 +565,15 @@ class TestMetadata:
         assert from_edition.description == "Edition desc"
         assert from_work.description == "Work desc"
 
+    def test_description_does_not_fallback_to_work_when_edition_missing_description(self):
+        metadata = _record(
+            key="/works/OL1W",
+            title="Book",
+            description="Work desc",
+            editions={"docs": [{"key": "/books/OL1M", "title": "Edition", "description": None}]},
+        ).metadata()
+        assert metadata.description is None
+
 
 class TestFormatAndLanguageHelpers:
     @pytest.mark.parametrize(
