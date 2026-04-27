@@ -251,6 +251,28 @@ class TestOpenLibraryDataRecord:
         assert metadata.author is not None
         assert metadata.author[0].name == "Author Without Key"
 
+    def test_record_metadata_with_author_key_adds_html_and_opds_links(self):
+        """Author contributors should include both HTML and OPDS author links."""
+        original = OpenLibraryDataProvider.OPDS_BASE_URL
+        OpenLibraryDataProvider.OPDS_BASE_URL = "https://example.org/opds"
+        try:
+            record = OpenLibraryDataRecord(
+                key="/works/OL45804W",
+                title="Test Book",
+                author_name=["Test Author"],
+                author_key=["OL12345A"],
+            )
+
+            metadata = record.metadata()
+            assert metadata.author is not None
+            assert metadata.author[0].links is not None
+            assert len(metadata.author[0].links) == 2
+            assert metadata.author[0].links[0].href == "https://openlibrary.org/authors/OL12345A"
+            assert metadata.author[0].links[1].href == "https://example.org/opds/authors/OL12345A"
+            assert metadata.author[0].links[1].type == "application/opds+json"
+        finally:
+            OpenLibraryDataProvider.OPDS_BASE_URL = original
+
     def test_record_links_skips_provider_without_url(self):
         """Acquisition links should skip providers missing URL instead of failing."""
         record = OpenLibraryDataRecord(
@@ -647,11 +669,12 @@ class TestFacetCountsAndBuilder:
         mock_count_for_mode.side_effect = lambda query, mode: None if mode == "buyable" else {
             "everything": 100,
             "ebooks": 50,
+            "print_disabled": 35,
             "open_access": 25,
         }[mode]
 
         counts = fetch_facet_counts("cats")
-        assert set(counts.keys()) == {"everything", "ebooks", "open_access", "buyable"}
+        assert set(counts.keys()) == {"everything", "ebooks", "print_disabled", "open_access", "buyable"}
         assert counts["buyable"] is None
 
     @patch("pyopds2_openlibrary.OpenLibraryDataProvider._count_for_mode")
@@ -667,12 +690,13 @@ class TestFacetCountsAndBuilder:
     def test_build_facets_groups_and_links_and_rels(self):
         facets = build_facets(base_url="https://example.org/opds", query="fox", sort="new", mode="ebooks")
 
-        assert len(facets) == 2
+        assert len(facets) == 3
         assert facets[0]["metadata"]["title"] == "Availability"
         assert facets[1]["metadata"]["title"] == "Language"
+        assert facets[2]["metadata"]["title"] == "Media Type"
 
         availability_titles = [l["title"] for l in facets[0]["links"]]
-        assert availability_titles == ["Everything", "Available to Borrow", "Open Access", "Available for Purchase"]
+        assert availability_titles == ["Everything", "Available to Borrow", "Print Disabled", "Open Access", "Available for Purchase"]
 
         for link in facets[0]["links"]:
             assert link["type"] == "application/opds+json"
@@ -686,6 +710,26 @@ class TestFacetCountsAndBuilder:
         parsed = parse_qs(urlparse(everything["href"]).query)
         assert parsed.get("query") == ["fox"]
         assert parsed.get("language") is None
+
+    def test_build_facets_media_type_links(self):
+        facets = build_facets(
+            base_url="https://example.org/opds",
+            query="fox",
+            sort="new",
+            mode="everything",
+            media_type="audiobook",
+        )
+
+        assert facets[2]["metadata"]["title"] == "Media Type"
+        media_titles = [l["title"] for l in facets[2]["links"]]
+        assert media_titles == ["All", "Ebooks", "Audiobooks"]
+
+        active = next(l for l in facets[2]["links"] if l["title"] == "Audiobooks")
+        assert active["rel"] == "self"
+
+        ebooks = next(l for l in facets[2]["links"] if l["title"] == "Ebooks")
+        parsed = parse_qs(urlparse(ebooks["href"]).query)
+        assert parsed.get("media_type") == ["ebook"]
 
     def test_build_facets_number_of_items_and_none_behavior(self):
         counts = {

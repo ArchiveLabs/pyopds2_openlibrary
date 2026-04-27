@@ -1,6 +1,7 @@
 import re as _re
 import time as _time
 import typing
+import unicodedata as _unicodedata
 from html.parser import HTMLParser as _HTMLParser
 from typing import List, Optional, TypedDict, cast
 from typing_extensions import Literal
@@ -170,6 +171,7 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
         """Return this record as OPDS Metadata."""
         def get_authors() -> Optional[List[Contributor]]:
             if self.author_name and self.author_key:
+                opds_base = OpenLibraryDataProvider.OPDS_BASE_URL or OpenLibraryDataProvider.BASE_URL
                 return [
                     Contributor(
                         name=name,
@@ -177,9 +179,13 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
                             Link(
                                 href=f"{OpenLibraryDataProvider.BASE_URL}/authors/{key}",
                                 type="text/html",
-                                rel="author"
-                            )
-                        ]
+                                rel="author",
+                            ),
+                            Link(
+                                href=f"{opds_base}/authors/{key}",
+                                type="application/opds+json",
+                            ),
+                        ],
                     )
                     for name, key in zip(self.author_name, self.author_key)
                 ]
@@ -385,6 +391,75 @@ def strip_markdown(text: str) -> str:
     return result.strip()
 
 
+def _is_latin_name(text: str) -> bool:
+    """Return True if every alphabetic character in *text* is Latin-script.
+
+    Uses Unicode character names (e.g. "LATIN SMALL LETTER A") rather than
+    a codepoint range so that IPA extensions and all Latin Extended blocks
+    are handled correctly, and non-Latin scripts (Cyrillic, Arabic, CJK, …)
+    are reliably detected regardless of their codepoint position.
+    """
+    return all(
+        _unicodedata.name(c, "").startswith("LATIN") or not c.isalpha()
+        for c in text
+    )
+
+
+# olid -> Latin personal_name, or None when no Latin alternative was found.
+_latin_author_cache: dict[str, Optional[str]] = {}
+
+
+def _latin_name_for_author(olid: str, current_name: str) -> str:
+    """Return a Latin-script display name for *olid*.
+
+    When *current_name* is already Latin it is returned unchanged.
+    Otherwise the author record is fetched (once, then cached) and
+    ``personal_name`` is returned if it is Latin.  Falls back to
+    *current_name* if no Latin alternative can be found.
+    """
+    if _is_latin_name(current_name):
+        return current_name
+    if olid in _latin_author_cache:
+        return _latin_author_cache[olid] or current_name
+    try:
+        data = _get(f"{OpenLibraryDataProvider.BASE_URL}/authors/{olid}.json").json()
+        personal = data.get("personal_name")
+        if personal and _is_latin_name(personal):
+            _latin_author_cache[olid] = personal
+            return personal
+    except Exception:
+        pass
+    _latin_author_cache[olid] = None
+    return current_name
+
+
+def fetch_author_bio(olid: str) -> tuple[Optional[str], Optional[str]]:
+    """Fetch author name and bio from the OpenLibrary author API.
+
+    Returns ``(name, bio)`` where bio has been stripped of Markdown/HTML.
+    Returns ``(None, None)`` on any failure — never raises.
+    """
+    try:
+        r = _get(f"{OpenLibraryDataProvider.BASE_URL}/authors/{olid}.json")
+        data = r.json()
+        name: Optional[str] = data.get("name") or data.get("personal_name")
+        # Prefer a Latin-script name when the OL primary name is in another script.
+        if name and not _is_latin_name(name):
+            personal = data.get("personal_name")
+            if personal and _is_latin_name(personal):
+                _latin_author_cache[olid] = personal
+                name = personal
+            else:
+                _latin_author_cache[olid] = None
+        raw_bio = data.get("bio")
+        if isinstance(raw_bio, dict):
+            raw_bio = raw_bio.get("value")
+        bio: Optional[str] = strip_markdown(raw_bio) if raw_bio else None
+        return name, bio
+    except Exception:
+        return None, None
+
+
 def marc_language_to_iso_639_1(marc_code: str) -> Optional[str]:
     """Convert a MARC language code to an ISO 639-1 code using the cached languages map.
 
@@ -543,8 +618,9 @@ def _get_edition_ebook_access(record: OpenLibraryDataRecord) -> Optional[str]:
 # 'buyable' is intentionally excluded: it is filtered client-side via
 # _has_buyable_provider, and an open-access book with a priced provider is a valid result.
 _EBOOK_MODE_ALLOWED: dict[str, frozenset[str]] = {
-    "ebooks":      frozenset({"borrowable", "printdisabled"}),
-    "open_access": frozenset({"public"}),
+    "ebooks":          frozenset({"borrowable", "printdisabled"}),
+    "open_access":     frozenset({"public"}),
+    "print_disabled":  frozenset({"printdisabled"}),
 }
 
 _EBOOK_ACCESS_RANK = {
@@ -710,10 +786,11 @@ def _align_editions_to_language(
 
 # Single canonical label per mode — used by both build_facets and build_home_facets.
 _AVAILABILITY_MODES: list[tuple[str, str]] = [
-    ("everything",  "Everything"),
-    ("ebooks",      "Available to Borrow"),
-    ("open_access", "Open Access"),
-    ("buyable",     "Available for Purchase"),
+    ("everything",     "Everything"),
+    ("ebooks",         "Available to Borrow"),
+    ("print_disabled", "Print Disabled"),
+    ("open_access",    "Open Access"),
+    ("buyable",        "Available for Purchase"),
 ]
 
 # Language options for the Language facet group (OPDS 2.0 §2.4).
@@ -725,6 +802,14 @@ _LANGUAGE_OPTIONS: list[tuple[Optional[str], str]] = [
     ("es", "Spanish"),
     ("fr", "French"),
     ("hi", "Hindi"),
+]
+
+# Media type options for the Media Type facet group (OPDS 2.0 §2.4).
+# ``None`` means "no media type filter" (All).
+_MEDIA_TYPE_OPTIONS: list[tuple[Optional[str], str]] = [
+    (None, "All"),
+    ("ebook", "Ebooks"),
+    ("audiobook", "Audiobooks"),
 ]
 
 
@@ -802,6 +887,82 @@ def _build_language_links(
         links.append(link)
     return links
 
+def _apply_media_type_filter(query: str, media_type: Optional[str]) -> str:
+    """Return *query* with a Solr clause for the requested media type.
+
+    - ``media_type="audiobook"`` appends ``subject_key:audiobooks``.
+    - ``media_type="ebook"`` appends ``ebook_access:[printdisabled TO *]``
+      when that filter is not already present.
+    - ``media_type=None`` returns the query unchanged.
+    """
+    if media_type == "audiobook":
+        return f"{query} subject_key:audiobooks".strip()
+    if media_type == "ebook" and "ebook_access:" not in query:
+        return f"{query} ebook_access:[printdisabled TO *]".strip()
+    return query
+
+
+def _build_media_type_links(
+    media_type: Optional[str],
+    href_fn: typing.Callable[[Optional[str]], str],
+) -> list[dict]:
+    """Build the list of media type facet link dicts per OPDS 2.0 §2.4."""
+    links = []
+    for mt_code, label in _MEDIA_TYPE_OPTIONS:
+        link: dict = {
+            "title": label,
+            "href": href_fn(mt_code),
+            "type": "application/opds+json",
+        }
+        if mt_code == media_type:
+            link["rel"] = "self"
+            link.setdefault("properties", {})["active"] = True
+        links.append(link)
+    return links
+
+
+# ---------------------------------------------------------------------------
+# Homepage carousel group helpers
+# ---------------------------------------------------------------------------
+
+_CLASSIC_BOOKS_GROUP: tuple[str, str, str] = (
+    "Classic Books",
+    'ddc:8* first_publish_year:[* TO 1950] publish_year:[2000 TO *] NOT public_scan_b:false -subject:"content_warning:cover"',
+    "trending",
+)
+
+_STANDARD_EBOOKS_GROUP: tuple[str, str, str] = (
+    "Standard Ebooks",
+    'publisher:"Standard Ebooks" ebook_access:public',
+    "random.hourly",
+)
+
+_KIDS_SUBJECT_FILTER: str = (
+    '(subject_key:(juvenile_audience OR children\'s_fiction OR juvenile_nonfiction OR juvenile_encyclopedias OR '
+    'juvenile_riddles OR juvenile_poetry OR juvenile_wit_and_humor OR juvenile_limericks OR juvenile_dictionaries OR '
+    'juvenile_non-fiction) OR subject:("Juvenile literature" OR "Juvenile fiction" OR "pour la jeunesse" OR "pour enfants"))'
+)
+
+
+def _subject_group(
+    title: str,
+    subject_filter: str,
+    ea: str,
+    sort: str = "trending",
+    extra: str = "",
+) -> tuple[str, str, str]:
+    """Build a subject-genre carousel group tuple."""
+    parts = [subject_filter, ea, 'trending_score_hourly_sum:[1 TO *]', '-subject:"content_warning:cover"']
+    if extra:
+        parts.append(extra)
+    return (title, " ".join(parts), sort)
+
+
+def _kids_group(ea: str) -> tuple[str, str, str]:
+    """Build the Kids carousel group tuple for a given ebook_access filter."""
+    return ("Kids", f'{ea} trending_score_hourly_sum:[1 TO *] {_KIDS_SUBJECT_FILTER} -subject:"content_warning:cover"', "random.hourly")
+
+
 class OpenLibraryDataProvider(DataProvider):
     """Data provider for Open Library records."""
     BASE_URL: str = "https://openlibrary.org"
@@ -840,6 +1001,8 @@ class OpenLibraryDataProvider(DataProvider):
         internal_query = query
         if mode == 'ebooks' and 'ebook_access:' not in internal_query:
             internal_query = f"{internal_query} ebook_access:[printdisabled TO *]"
+        elif mode == 'print_disabled' and 'ebook_access:' not in internal_query:
+            internal_query = f"{internal_query} ebook_access:printdisabled"
         elif mode == 'open_access' and 'ebook_access:' not in internal_query:
             internal_query = f"{internal_query} ebook_access:public"
 
@@ -850,7 +1013,12 @@ class OpenLibraryDataProvider(DataProvider):
         return r.json().get("numFound", 0)
 
     @staticmethod
-    def fetch_facet_counts(query: str, known_mode: Optional[str] = None, known_total: Optional[int] = None) -> dict[str, Optional[int]]:
+    def fetch_facet_counts(
+        query: str,
+        known_mode: Optional[str] = None,
+        known_total: Optional[int] = None,
+        media_type: Optional[str] = None,
+    ) -> dict[str, Optional[int]]:
         """Fetch ``numberOfItems`` counts for every availability mode.
 
         If *known_mode* and *known_total* are provided the count request for
@@ -863,7 +1031,10 @@ class OpenLibraryDataProvider(DataProvider):
         """
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        modes = ["everything", "ebooks", "open_access", "buyable"]
+        # Apply media_type filter to base query before per-mode count requests.
+        base_query = _apply_media_type_filter(query, media_type)
+
+        modes = ["everything", "ebooks", "print_disabled", "open_access", "buyable"]
         counts: dict[str, Optional[int]] = {}
         to_fetch: list[str] = []
         for m in modes:
@@ -876,7 +1047,7 @@ class OpenLibraryDataProvider(DataProvider):
 
         if to_fetch:
             with ThreadPoolExecutor(max_workers=len(to_fetch)) as pool:
-                futures = {pool.submit(OpenLibraryDataProvider._count_for_mode, query, m): m for m in to_fetch}
+                futures = {pool.submit(OpenLibraryDataProvider._count_for_mode, base_query, m): m for m in to_fetch}
                 for future in as_completed(futures):
                     counts[futures[future]] = future.result()
 
@@ -892,6 +1063,7 @@ class OpenLibraryDataProvider(DataProvider):
         title: Optional[str] = None,
         total: Optional[int] = None,
         availability_counts: Optional[dict[str, int]] = None,
+        media_type: Optional[str] = None,
     ) -> list[dict]:
         """Build OPDS 2.0 facets for availability and language filtering.
 
@@ -922,6 +1094,7 @@ class OpenLibraryDataProvider(DataProvider):
             sort_val: Optional[str] = sort,
             mode_val: str = mode,
             lang_val: Optional[str] = language,
+            mt_val: Optional[str] = media_type,
         ) -> str:
             # Strip ebook_access filters from the query for "everything" mode
             # so the facet link truly returns all results regardless of how
@@ -936,6 +1109,8 @@ class OpenLibraryDataProvider(DataProvider):
                 params["mode"] = mode_val
             if lang_val:
                 params["language"] = lang_val
+            if mt_val:
+                params["media_type"] = mt_val
             if title:
                 params["title"] = title
             return f"{base_url}/search?{urlencode(params)}"
@@ -960,6 +1135,13 @@ class OpenLibraryDataProvider(DataProvider):
                     href_fn=lambda lang: search_href(lang_val=lang),
                 ),
             },
+            {
+                "metadata": {"title": "Media Type"},
+                "links": _build_media_type_links(
+                    media_type=media_type,
+                    href_fn=lambda mt: search_href(mt_val=mt),
+                ),
+            },
         ]
 
     @staticmethod
@@ -967,8 +1149,9 @@ class OpenLibraryDataProvider(DataProvider):
         base_url: str,
         mode: str = "everything",
         language: Optional[str] = None,
+        media_type: Optional[str] = None,
     ) -> list[dict]:
-        """Build Availability and Language facet groups for the OPDS homepage.
+        """Build Availability, Language, and Media Type facet groups for the OPDS homepage.
 
         Uses the same canonical labels as ``build_facets``.
         Links point to ``<base_url>/?mode=<value>`` / ``<base_url>/?language=<code>``.
@@ -979,6 +1162,8 @@ class OpenLibraryDataProvider(DataProvider):
             mode: Currently active availability mode.
             language: Active BCP 47 language code (e.g. ``"en"``), or ``None``
                 for "All Languages" (no filter).
+            media_type: Active media type (e.g. ``"ebook"`` or ``"audiobook"``),
+                or ``None`` for all media types.
         """
         def home_href(val: str) -> str:
             params: dict[str, str] = {}
@@ -986,6 +1171,8 @@ class OpenLibraryDataProvider(DataProvider):
                 params["mode"] = val
             if language:
                 params["language"] = language
+            if media_type:
+                params["media_type"] = media_type
             return f"{base_url}/?{urlencode(params)}" if params else f"{base_url}/"
 
         def lang_href(lang: Optional[str]) -> str:
@@ -994,6 +1181,18 @@ class OpenLibraryDataProvider(DataProvider):
                 params["mode"] = mode
             if lang:
                 params["language"] = lang
+            if media_type:
+                params["media_type"] = media_type
+            return f"{base_url}/?{urlencode(params)}" if params else f"{base_url}/"
+
+        def mt_href(mt: Optional[str]) -> str:
+            params: dict[str, str] = {}
+            if mode != "everything":
+                params["mode"] = mode
+            if language:
+                params["language"] = language
+            if mt:
+                params["media_type"] = mt
             return f"{base_url}/?{urlencode(params)}" if params else f"{base_url}/"
 
         return [
@@ -1010,6 +1209,72 @@ class OpenLibraryDataProvider(DataProvider):
                 "links": _build_language_links(
                     language=language,
                     href_fn=lang_href,
+                ),
+            },
+            {
+                "metadata": {"title": "Media Type"},
+                "links": _build_media_type_links(
+                    media_type=media_type,
+                    href_fn=mt_href,
+                ),
+            },
+        ]
+
+    @staticmethod
+    def build_author_facets(
+        base_url: str,
+        olid: str,
+        mode: str = "everything",
+        language: Optional[str] = None,
+        media_type: Optional[str] = None,
+        page: int = 1,
+        limit: int = 25,
+    ) -> list[dict]:
+        """Build Availability, Language, and Media Type facet groups for an author catalog page.
+
+        Links point to ``<base_url>/authors/<olid>?mode=<value>&...``, preserving
+        the current page, limit, language, and media_type selections when switching
+        between facets.
+        """
+        def author_href(
+            mode_val: str = mode,
+            lang_val: Optional[str] = language,
+            mt_val: Optional[str] = media_type,
+        ) -> str:
+            params: dict[str, str] = {}
+            if page > 1:
+                params["page"] = str(page)
+            if limit != 25:
+                params["limit"] = str(limit)
+            if mode_val != "everything":
+                params["mode"] = mode_val
+            if lang_val:
+                params["language"] = lang_val
+            if mt_val:
+                params["media_type"] = mt_val
+            return f"{base_url}/authors/{olid}?{urlencode(params)}" if params else f"{base_url}/authors/{olid}"
+
+        return [
+            {
+                "metadata": {"title": "Availability"},
+                "links": _build_availability_links(
+                    mode=mode,
+                    href_fn=lambda val: author_href(mode_val=val),
+                    exclude={"buyable"},
+                ),
+            },
+            {
+                "metadata": {"title": "Language"},
+                "links": _build_language_links(
+                    language=language,
+                    href_fn=lambda lang: author_href(lang_val=lang),
+                ),
+            },
+            {
+                "metadata": {"title": "Media Type"},
+                "links": _build_media_type_links(
+                    media_type=media_type,
+                    href_fn=lambda mt: author_href(mt_val=mt),
                 ),
             },
         ]
@@ -1046,48 +1311,54 @@ class OpenLibraryDataProvider(DataProvider):
         Each entry is ``(title, solr_query, sort)``.  The *mode* parameter
         controls the ``ebook_access`` filter baked into each query.
         """
-        ea = "ebook_access:public" if mode == "open_access" else "ebook_access:[borrowable TO *]"
+        if mode == "open_access":
+            # Public-domain-friendly groups ordered by reliability.
+            # Romance, Thrillers, and Textbooks are excluded because post-1928
+            # books in those genres are mostly still under copyright.
+            # Trending drops readinglog_count so older public-domain classics
+            # (which accumulate fewer logs) still surface.
+            oa = "ebook_access:public"
+            return [
+                _CLASSIC_BOOKS_GROUP,
+                _STANDARD_EBOOKS_GROUP,
+                ("Trending Books", f'trending_score_hourly_sum:[1 TO *] -subject:"content_warning:cover" {oa}', "trending"),
+                _kids_group(oa),
+                _subject_group("Science", "subject_key:science", oa),
+                _subject_group("History", "subject_key:history", oa),
+                _subject_group("Philosophy", "subject_key:philosophy", oa),
+            ]
+
+        if mode == "print_disabled":
+            # Print-disabled groups ordered by density of printdisabled books.
+            # Standard Ebooks is excluded (ebook_access:public, filtered out by post-filter).
+            # Trending drops readinglog_count because print-disabled titles
+            # accumulate fewer reading logs than borrowable books.
+            pd = "ebook_access:printdisabled"
+            return [
+                _CLASSIC_BOOKS_GROUP,
+                _kids_group(pd),
+                ("Textbooks", f'subject_key:textbooks publish_year:[1990 TO *] {pd}', "trending"),
+                ("Trending Books", f'trending_score_hourly_sum:[1 TO *] -subject:"content_warning:cover" {pd}', "trending"),
+                _subject_group("Romance", "subject:romance first_publish_year:[1930 TO *]", pd, sort="trending,trending_score_hourly_sum"),
+                _subject_group("Thrillers", "subject:thrillers", pd, sort="trending,trending_score_hourly_sum"),
+                _subject_group("Science", "subject_key:science", pd),
+            ]
+
+        ea = "ebook_access:[borrowable TO *]"
         return [
-            (
-                "Trending Books",
-                f'trending_score_hourly_sum:[1 TO *] -subject:"content_warning:cover" {ea} readinglog_count:[4 TO *]',
-                "trending",
-            ),
-            (
-                "Classic Books",
-                'ddc:8* first_publish_year:[* TO 1950] publish_year:[2000 TO *] NOT public_scan_b:false -subject:"content_warning:cover"',
-                "trending",
-            ),
-            (
-                "Romance",
-                f'subject:romance {ea} first_publish_year:[1930 TO *] trending_score_hourly_sum:[1 TO *] -subject:"content_warning:cover"',
-                "trending,trending_score_hourly_sum",
-            ),
-            (
-                "Kids",
-                f'{ea} trending_score_hourly_sum:[1 TO *] (subject_key:(juvenile_audience OR children\'s_fiction OR juvenile_nonfiction OR juvenile_encyclopedias OR juvenile_riddles OR juvenile_poetry OR juvenile_wit_and_humor OR juvenile_limericks OR juvenile_dictionaries OR juvenile_non-fiction) OR subject:("Juvenile literature" OR "Juvenile fiction" OR "pour la jeunesse" OR "pour enfants"))',
-                "random.hourly",
-            ),
-            (
-                "Thrillers",
-                f'subject:thrillers {ea} trending_score_hourly_sum:[1 TO *] -subject:"content_warning:cover"',
-                "trending,trending_score_hourly_sum",
-            ),
-            (
-                "Textbooks",
-                f'subject_key:textbooks publish_year:[1990 TO *] {ea}',
-                "trending",
-            ),
-            (
-                "Standard Ebooks",
-                'publisher:"Standard Ebooks" ebook_access:public',
-                "random.hourly",
-            ),
+            ("Trending Books", f'trending_score_hourly_sum:[1 TO *] -subject:"content_warning:cover" {ea} readinglog_count:[4 TO *]', "trending"),
+            _CLASSIC_BOOKS_GROUP,
+            _subject_group("Romance", "subject:romance first_publish_year:[1930 TO *]", ea, sort="trending,trending_score_hourly_sum"),
+            _kids_group(ea),
+            _subject_group("Thrillers", "subject:thrillers", ea, sort="trending,trending_score_hourly_sum"),
+            ("Textbooks", f'subject_key:textbooks publish_year:[1990 TO *] {ea}', "trending"),
+            _STANDARD_EBOOKS_GROUP,
         ]
 
     @staticmethod
     def _home_page_href(
         base: str, mode: str, language: Optional[str], page: int,
+        media_type: Optional[str] = None,
     ) -> str:
         """Build a homepage href with pagination."""
         params: dict[str, str] = {}
@@ -1095,6 +1366,8 @@ class OpenLibraryDataProvider(DataProvider):
             params["mode"] = mode
         if language:
             params["language"] = language
+        if media_type:
+            params["media_type"] = media_type
         if page > 1:
             params["page"] = str(page)
         return f"{base}/?{urlencode(params)}" if params else f"{base}/"
@@ -1107,6 +1380,7 @@ class OpenLibraryDataProvider(DataProvider):
         language: Optional[str] = None,
         page: int = 1,
         featured_subjects: Optional[list[dict[str, str]]] = None,
+        media_type: Optional[str] = None,
     ) -> dict:
         """Build a complete OPDS 2.0 homepage catalog dict.
 
@@ -1123,6 +1397,8 @@ class OpenLibraryDataProvider(DataProvider):
             featured_subjects: Override the default ``FEATURED_SUBJECTS``
                 list.  Each entry needs ``presentable_name`` and either
                 ``key`` or ``query``.
+            media_type: Media type filter (``"ebook"``, ``"audiobook"``,
+                or ``None`` for all).
 
         Returns:
             A dict ready to be serialised as JSON (via ``Catalog.model_dump``).
@@ -1146,6 +1422,7 @@ class OpenLibraryDataProvider(DataProvider):
                 resp = cls.search(
                     query=query, sort=sort, limit=25,
                     language=language, facets={"mode": mode}, title=title,
+                    media_type=media_type,
                 )
                 return Catalog.create(metadata=Metadata(title=title), response=resp)
             except Exception:
@@ -1183,6 +1460,8 @@ class OpenLibraryDataProvider(DataProvider):
                 }
                 if language:
                     nav_params["language"] = language
+                if media_type:
+                    nav_params["media_type"] = media_type
                 navigation.append(Navigation(
                     type=media,
                     title=subject["presentable_name"],
@@ -1191,23 +1470,23 @@ class OpenLibraryDataProvider(DataProvider):
 
         # Links
         links = [
-            Link(rel="self", href=cls._home_page_href(base, mode, language, page), type=media),
+            Link(rel="self", href=cls._home_page_href(base, mode, language, page, media_type), type=media),
             Link(rel="start", href=f"{base}/", type=media),
             Link(rel="search", href=f"{base}/search{{?query}}", type=media, templated=True),
             cls.bookshelf_link(),
             cls.profile_link(),
         ]
         if has_next:
-            links.append(Link(rel="next", href=cls._home_page_href(base, mode, language, page + 1), type=media))
+            links.append(Link(rel="next", href=cls._home_page_href(base, mode, language, page + 1, media_type), type=media))
         if page > 1:
-            links.append(Link(rel="previous", href=cls._home_page_href(base, mode, language, page - 1), type=media))
+            links.append(Link(rel="previous", href=cls._home_page_href(base, mode, language, page - 1, media_type), type=media))
 
         catalog = Catalog(
             metadata=Metadata(title="Open Library"),
             publications=[],
             navigation=navigation,
             groups=loaded_groups,
-            facets=cls.build_home_facets(base, mode, language) if page == 1 else [],
+            facets=cls.build_home_facets(base, mode, language, media_type),
             links=links,
         )
         return catalog.model_dump()
@@ -1223,6 +1502,7 @@ class OpenLibraryDataProvider(DataProvider):
         language: Optional[str] = None,
         title: Optional[str] = None,
         require_cover: bool = True,
+        media_type: Optional[str] = None,
     ) -> DataProvider.SearchResponse:
         """
         Search Open Library.
@@ -1271,10 +1551,15 @@ class OpenLibraryDataProvider(DataProvider):
             internal_query = _re.sub(r'\s*ebook_access:(?:\[[^\]]*\]|\S+)', '', internal_query).strip()
         elif mode == 'ebooks' and 'ebook_access:' not in internal_query:
             internal_query = f"{internal_query} ebook_access:[printdisabled TO *]"
+        elif mode == 'print_disabled' and 'ebook_access:' not in internal_query:
+            internal_query = f"{internal_query} ebook_access:printdisabled"
         elif mode == 'open_access' and 'ebook_access:' not in internal_query:
             internal_query = f"{internal_query} ebook_access:public"
         elif mode == 'buyable' and 'ebook_access:' not in internal_query:
             internal_query = f"{internal_query} ebook_access:[printdisabled TO *]"
+
+        # Apply media_type filter (audiobook/ebook) on top of the mode filter.
+        internal_query = _apply_media_type_filter(internal_query, media_type)
 
         # When a language filter is active, add language:<MARC> to the Solr
         # query so non-matching works are excluded (the `lang` param only
@@ -1327,7 +1612,7 @@ class OpenLibraryDataProvider(DataProvider):
         else:
             records = [r for r in records if _has_acquisition_options(r)]
 
-        if mode in ('ebooks', 'open_access', 'buyable'):
+        if mode in ('ebooks', 'print_disabled', 'open_access', 'buyable'):
             if mode == 'buyable':
                 # Keep only records that have a non-free provider.
                 # This is a client-side filter (Solr has no buyable field).
@@ -1350,6 +1635,31 @@ class OpenLibraryDataProvider(DataProvider):
         # cannot produce an accurate count; use the final post-filter record count.
         if mode == 'buyable':
             total = len(records)
+
+        # Resolve non-Latin author names (e.g. Cyrillic) to their Latin personal_name.
+        # OL's search index stores author_name from the author record's `name` field,
+        # which for authors like Chekhov is in their native script. We fetch the author
+        # record once (cached) and use personal_name when it is Latin-script.
+        olid_to_nonlatin: dict[str, str] = {}  # olid -> first non-Latin name seen
+        for r in records:
+            if r.author_name and r.author_key:
+                for name, key in zip(r.author_name, r.author_key):
+                    if not _is_latin_name(name) and key not in _latin_author_cache and key not in olid_to_nonlatin:
+                        olid_to_nonlatin[key] = name
+        if olid_to_nonlatin:
+            with ThreadPoolExecutor(max_workers=min(len(olid_to_nonlatin), 4)) as pool:
+                futures = {pool.submit(_latin_name_for_author, olid, name): olid for olid, name in olid_to_nonlatin.items()}
+                for future in as_completed(futures):
+                    future.result()
+        for record in records:
+            if record.author_name and record.author_key:
+                resolved = [
+                    (_latin_author_cache.get(key) or name) if not _is_latin_name(name) else name
+                    for name, key in zip(record.author_name, record.author_key)
+                ]
+                # Preserve any trailing names that have no corresponding author_key entry.
+                resolved.extend(record.author_name[len(resolved):])
+                record.author_name = resolved
 
         response_kwargs = {
             "provider": OpenLibraryDataProvider,
