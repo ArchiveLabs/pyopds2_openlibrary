@@ -115,10 +115,12 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
         None, description="Editions information (nested structure)"
     )
     number_of_pages_median: Optional[int] = None
+    id_librivox: Optional[list[str]] = None
 
     @property
     def type(self) -> str:
-        """Type _should_ be improved to dynamically return type based on record data."""
+        if self.id_librivox:
+            return "http://schema.org/Audiobook"
         return "http://schema.org/Book"
 
     def links(self) -> List[Link]:
@@ -144,18 +146,32 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
             ),
         ]
 
-        if not edition or not edition.providers:
-            return links
-
         seen: set[tuple[str, str | None]] = set()
-        for acquisition in edition.providers:
-            if not acquisition.url:
-                continue
-            for link in ol_acquisition_to_opds_links(edition, acquisition):
-                key = (link.href, link.type)
-                if key not in seen:
-                    seen.add(key)
-                    links.append(link)
+        if edition and edition.providers:
+            for acquisition in edition.providers:
+                if not acquisition.url:
+                    continue
+                for link in ol_acquisition_to_opds_links(edition, acquisition):
+                    key = (link.href, link.type)
+                    if key not in seen:
+                        seen.add(key)
+                        links.append(link)
+
+        # When no audio link was produced by the edition providers but the work
+        # has a LibriVox recording, add the LibriVox catalog page as a fallback.
+        has_audio = any(
+            lnk.type in ("audio/mpeg", "application/audiobook+json")
+            or lnk.href.startswith("https://librivox.org")
+            for lnk in links
+        )
+        if self.id_librivox and not has_audio:
+            links.append(Link(
+                rel="alternate",
+                href=f"https://librivox.org/{self.id_librivox[0]}",
+                type="text/html",
+                title="LibriVox",
+            ))
+
         return links
 
     def images(self) -> Optional[List[Link]]:
@@ -534,6 +550,10 @@ def _has_acquisition_options(record: OpenLibraryDataRecord) -> bool:
     Mirrors the filtering logic in ``ol_acquisition_to_opds_links`` so that
     books with no actionable link are hidden from results.
     """
+    # Works with a LibriVox recording always have audio content, even when the
+    # edition returned by OL's search API is a print/ebook edition with no providers.
+    if record.id_librivox:
+        return True
     edition = record.editions.docs[0] if record.editions and record.editions.docs else None
     if not edition or not edition.providers:
         return False
@@ -890,13 +910,14 @@ def _build_language_links(
 def _apply_media_type_filter(query: str, media_type: Optional[str]) -> str:
     """Return *query* with a Solr clause for the requested media type.
 
-    - ``media_type="audiobook"`` appends ``subject_key:audiobooks``.
+    - ``media_type="audiobook"`` appends ``id_librivox:*`` to restrict to
+      works that have a LibriVox audio recording on the Internet Archive.
     - ``media_type="ebook"`` appends ``ebook_access:[printdisabled TO *]``
       when that filter is not already present.
     - ``media_type=None`` returns the query unchanged.
     """
     if media_type == "audiobook":
-        return f"{query} subject_key:audiobooks".strip()
+        return f"{query} id_librivox:*".strip()
     if media_type == "ebook" and "ebook_access:" not in query:
         return f"{query} ebook_access:[printdisabled TO *]".strip()
     return query
@@ -1536,7 +1557,7 @@ class OpenLibraryDataProvider(DataProvider):
         fields = [
             "key", "title", "editions", "description", "providers", "author_name", "ia",
             "cover_i", "availability", "ebook_access", "author_key", "subtitle", "language",
-            "number_of_pages_median",
+            "number_of_pages_median", "id_librivox",
         ]
 
         internal_query = query
@@ -1611,6 +1632,13 @@ class OpenLibraryDataProvider(DataProvider):
             records = [r for r in records if _has_acquisition_options(r) and _has_cover(r)]
         else:
             records = [r for r in records if _has_acquisition_options(r)]
+
+        # When the user explicitly filters by ebook media type, exclude audiobook
+        # records (works whose primary content is a LibriVox audio recording).
+        # LibriVox works have ebook_access:public so they survive mode filters,
+        # but they belong in the audiobook facet, not the ebook facet.
+        if media_type == "ebook":
+            records = [r for r in records if not r.id_librivox]
 
         if mode in ('ebooks', 'print_disabled', 'open_access', 'buyable'):
             if mode == 'buyable':

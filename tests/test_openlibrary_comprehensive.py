@@ -113,6 +113,12 @@ class TestModels:
         assert record.title == "Minimal"
         assert record.editions is None
 
+    def test_openlibrary_data_record_uses_audiobook_type_when_librivox_present(self):
+        record = OpenLibraryDataRecord.model_validate(
+            {"key": "/works/OL1W", "title": "Audio", "id_librivox": ["lv123"]}
+        )
+        assert record.type == "http://schema.org/Audiobook"
+
     @pytest.mark.parametrize("status", ["borrow_available", "borrow_unavailable", "open", "private", "error"])
     def test_edition_availability_valid_statuses(self, status: str):
         availability = OpenLibraryDataRecord.EditionAvailability.model_validate({"status": status})
@@ -259,6 +265,19 @@ class TestLinks:
             },
         )
         assert len(record.links()) == 3
+
+    def test_librivox_record_adds_fallback_audio_link_when_no_audio_links_exist(self):
+        record = _record(
+            key="/works/OL8W",
+            title="Book",
+            id_librivox=["12345"],
+            editions={"docs": [{"key": "/books/OL8M", "title": "Edition", "providers": []}]},
+        )
+
+        links = record.links()
+        fallback = next(l for l in links if l.title == "LibriVox")
+        assert fallback.href == "https://librivox.org/12345"
+        assert fallback.type == "text/html"
 
     def test_self_link_uses_opds_base_url_when_set(self):
         original = OpenLibraryDataProvider.OPDS_BASE_URL
@@ -1333,7 +1352,7 @@ class TestSearch:
         response.json.return_value = {"numFound": 0, "docs": []}
         mock_get.return_value = response
         OpenLibraryDataProvider.search("cats", media_type="audiobook")
-        assert mock_get.call_args.kwargs["params"]["q"] == "cats subject_key:audiobooks"
+        assert mock_get.call_args.kwargs["params"]["q"] == "cats id_librivox:*"
 
     @patch("pyopds2_openlibrary.httpx.get")
     def test_media_type_ebook_adds_filter_when_missing(self, mock_get):
@@ -1343,6 +1362,42 @@ class TestSearch:
         mock_get.return_value = response
         OpenLibraryDataProvider.search("cats", media_type="ebook")
         assert mock_get.call_args.kwargs["params"]["q"] == "cats ebook_access:[printdisabled TO *]"
+
+    @patch("pyopds2_openlibrary.httpx.get")
+    def test_media_type_ebook_filters_out_librivox_records(self, mock_get):
+        response = MagicMock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {
+            "numFound": 2,
+            "docs": [
+                {
+                    "key": "/works/OL1W",
+                    "title": "Audio",
+                    "cover_i": 123,
+                    "ebook_access": "public",
+                    "id_librivox": ["lv123"],
+                    "editions": {"docs": [{"key": "/books/OL1M", "title": "Audio", "providers": []}]},
+                },
+                {
+                    "key": "/works/OL2W",
+                    "title": "Ebook",
+                    "cover_i": 123,
+                    "ebook_access": "printdisabled",
+                    "editions": {
+                        "docs": [
+                            {
+                                "key": "/books/OL2M",
+                                "title": "Ebook",
+                                "providers": [{"url": "https://example.org/read", "format": "epub"}],
+                            }
+                        ]
+                    },
+                },
+            ],
+        }
+        mock_get.return_value = response
+        result = OpenLibraryDataProvider.search("cats", media_type="ebook")
+        assert [r.title for r in result.records] == ["Ebook"]
 
     @patch("pyopds2_openlibrary.httpx.get")
     def test_mode_buyable_filters_to_non_free_providers(self, mock_get):
