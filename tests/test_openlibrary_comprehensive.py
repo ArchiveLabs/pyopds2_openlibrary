@@ -20,13 +20,17 @@ from pyopds2_openlibrary import (
     _has_acquisition_options,
     _has_buyable_provider,
     _is_currently_available,
+    _is_latin_name,
+    _latin_name_for_author,
     _parse_price_amount,
     _resolve_preferred_edition,
+    fetch_author_bio,
     fetch_languages_map,
     iso_639_1_to_marc,
     map_ol_format_to_mime,
     marc_language_to_iso_639_1,
     ol_acquisition_to_opds_links,
+    strip_markdown,
 )
 
 build_facets = OpenLibraryDataProvider.build_facets
@@ -934,7 +938,7 @@ class TestResolvePreferredEdition:
                                 "key": "/books/OLFRA",
                                 "title": "French",
                                 "language": ["fr"],
-                                "providers": [{"url": "https://fr.example", "format": "epub"}],
+                                "ebook_access": "public",
                             }
                         ]
                     },
@@ -973,7 +977,7 @@ class TestResolvePreferredEdition:
 class TestAvailabilityFacetPrimitive:
     def test_all_modes_included_by_default(self):
         links = _build_availability_links(mode="everything", href_fn=lambda m: f"/search?mode={m}")
-        assert [l["title"] for l in links] == ["Everything", "Available to Borrow", "Print Disabled", "Open Access", "Available for Purchase"]
+        assert [l["title"] for l in links] == ["Everything", "Available to Borrow", "Open Access", "Available for Purchase"]
 
     def test_active_mode_gets_self_rel(self):
         links = _build_availability_links(mode="ebooks", href_fn=lambda m: f"/search?mode={m}")
@@ -1009,22 +1013,27 @@ class TestAvailabilityFacetPrimitive:
             href_fn=lambda m: f"/search?mode={m}",
             exclude={"buyable"},
         )
-        assert len(links) == 4
+        assert len(links) == 3
         assert all(l["title"] != "Available for Purchase" for l in links)
 
 
 class TestFacetBuilders:
     def test_build_facets_returns_availability_group(self):
         facets = build_facets(base_url="https://example.org/opds", query="cats")
-        assert len(facets) == 3
+        assert len(facets) == 4
         assert facets[0]["metadata"]["title"] == "Availability"
         assert facets[1]["metadata"]["title"] == "Language"
         assert facets[2]["metadata"]["title"] == "Media Type"
+        assert facets[3]["metadata"]["title"] == "Access"
 
     def test_build_facets_availability_links_titles(self):
         facets = build_facets(base_url="https://example.org/opds", query="cats")
         titles = [l["title"] for l in facets[0]["links"]]
-        assert titles == ["Everything", "Available to Borrow", "Print Disabled", "Open Access", "Available for Purchase"]
+        assert titles == ["Everything", "Available to Borrow", "Open Access", "Available for Purchase"]
+        
+        # Check Access facet exists and has correct links
+        access_titles = [l["title"] for l in facets[3]["links"]]
+        assert access_titles == ["General", "Print Disabled"]
 
     def test_build_facets_media_type_links_titles(self):
         facets = build_facets(base_url="https://example.org/opds", query="cats", media_type="ebook")
@@ -1066,18 +1075,19 @@ class TestFacetBuilders:
 
     def test_build_home_facets_returns_availability_only(self):
         facets = OpenLibraryDataProvider.build_home_facets(base_url="https://example.org/opds", mode="everything")
-        assert len(facets) == 3
+        assert len(facets) == 4
         assert facets[0]["metadata"]["title"] == "Availability"
         assert facets[1]["metadata"]["title"] == "Language"
         assert facets[2]["metadata"]["title"] == "Media Type"
+        assert facets[3]["metadata"]["title"] == "Access"
 
     def test_build_home_facets_uses_home_labels(self):
         facets = OpenLibraryDataProvider.build_home_facets(base_url="https://example.org/opds", mode="everything")
-        assert [l["title"] for l in facets[0]["links"]] == ["Everything", "Available to Borrow", "Print Disabled", "Open Access"]
+        assert [l["title"] for l in facets[0]["links"]] == ["Everything", "Available to Borrow", "Open Access"]
 
     def test_build_home_facets_excludes_buyable(self):
         facets = OpenLibraryDataProvider.build_home_facets(base_url="https://example.org/opds", mode="everything")
-        assert len(facets[0]["links"]) == 4
+        assert len(facets[0]["links"]) == 3
 
     def test_build_home_facets_links_point_to_root_mode(self):
         facets = OpenLibraryDataProvider.build_home_facets(base_url="https://example.org/opds", mode="ebooks")
@@ -1138,7 +1148,7 @@ class TestHomeFeed:
         assert "previous" not in links_by_rel
 
         assert len(feed["groups"]) == OpenLibraryDataProvider.GROUPS_PER_PAGE
-        assert len(feed["facets"]) == 3
+        assert len(feed["facets"]) == 4
         assert len(feed["navigation"]) == 2
 
         first_nav_qs = parse_qs(urlparse(feed["navigation"][0].href).query)
@@ -1184,7 +1194,7 @@ class TestHomeFeed:
         assert links_by_rel["next"].href == "https://example.org/opds/?page=3"
         assert links_by_rel["previous"].href == "https://example.org/opds/"
         assert feed["navigation"] == []
-        assert len(feed["facets"]) == 3
+        assert len(feed["facets"]) == 4
 
     @patch("pyopds2_openlibrary.OpenLibraryDataProvider.search")
     @patch("pyopds2_openlibrary.Catalog")
@@ -1270,7 +1280,7 @@ class TestSearch:
         title: str,
         price: str | None,
         status: str,
-        ebook_access: str = "printdisabled",
+        ebook_access: str = "public",
         providers: list[dict] | None = None,
         editions_docs: list[dict] | None = None,
     ) -> dict:
@@ -1382,7 +1392,7 @@ class TestSearch:
                     "key": "/works/OL2W",
                     "title": "Ebook",
                     "cover_i": 123,
-                    "ebook_access": "printdisabled",
+                    "ebook_access": "public",
                     "editions": {
                         "docs": [
                             {
@@ -1468,14 +1478,14 @@ class TestSearch:
     @pytest.mark.parametrize("mode", ["ebooks", "buyable"])
     @patch("pyopds2_openlibrary.httpx.get")
     def test_available_books_sorted_before_unavailable(self, mock_get, mode: str):
-        ebook_access = "public" if mode == "open_access" else "printdisabled"
+        # Use "public" ebook_access for ebooks/buyable modes (these are about filtering availability, not print-disabled)
         response = MagicMock()
         response.raise_for_status.return_value = None
         response.json.return_value = {
             "numFound": 2,
             "docs": [
-                self._search_doc("/works/OL1W", "Unavailable", "9.99 USD", "borrow_unavailable", ebook_access=ebook_access),
-                self._search_doc("/works/OL2W", "Available", "9.99 USD", "borrow_available", ebook_access=ebook_access),
+                self._search_doc("/works/OL1W", "Unavailable", "9.99 USD", "borrow_unavailable", ebook_access="borrowable"),
+                self._search_doc("/works/OL2W", "Available", "9.99 USD", "borrow_available", ebook_access="borrowable"),
             ],
         }
         mock_get.return_value = response

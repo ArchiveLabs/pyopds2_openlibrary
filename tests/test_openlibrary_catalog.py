@@ -467,7 +467,9 @@ class TestOpenLibraryDataProvider:
             mock_response.raise_for_status.return_value = None
             mock_get.return_value = mock_response
 
-            catalog = Catalog.create(OpenLibraryDataProvider.search("any query"))
+            # Pass access="print_disabled" when testing print-disabled books
+            search_access = "print_disabled" if ebook_access == "printdisabled" else None
+            catalog = Catalog.create(OpenLibraryDataProvider.search("any query", access=search_access))
             publication = catalog.publications[0]
             acquisition_link = next((link for link in publication.links if '/acquisition/' in link.rel), None)
             return acquisition_link.properties['availability']
@@ -690,13 +692,17 @@ class TestFacetCountsAndBuilder:
     def test_build_facets_groups_and_links_and_rels(self):
         facets = build_facets(base_url="https://example.org/opds", query="fox", sort="new", mode="ebooks")
 
-        assert len(facets) == 3
+        assert len(facets) == 4
         assert facets[0]["metadata"]["title"] == "Availability"
         assert facets[1]["metadata"]["title"] == "Language"
         assert facets[2]["metadata"]["title"] == "Media Type"
+        assert facets[3]["metadata"]["title"] == "Access"
 
         availability_titles = [l["title"] for l in facets[0]["links"]]
-        assert availability_titles == ["Everything", "Available to Borrow", "Print Disabled", "Open Access", "Available for Purchase"]
+        assert availability_titles == ["Everything", "Available to Borrow", "Open Access", "Available for Purchase"]
+
+        access_titles = [l["title"] for l in facets[3]["links"]]
+        assert access_titles == ["General", "Print Disabled"]
 
         for link in facets[0]["links"]:
             assert link["type"] == "application/opds+json"
@@ -710,6 +716,12 @@ class TestFacetCountsAndBuilder:
         parsed = parse_qs(urlparse(everything["href"]).query)
         assert parsed.get("query") == ["fox"]
         assert parsed.get("language") is None
+
+        # Check Access facet
+        for link in facets[3]["links"]:
+            assert link["type"] == "application/opds+json"
+            assert "title" in link
+            assert "href" in link
 
     def test_build_facets_media_type_links(self):
         facets = build_facets(
@@ -813,21 +825,21 @@ class TestSearchModeHandling:
             self._solr_doc(
                 key="/works/OLP1W",
                 title="Paid Available",
-                ebook_access="printdisabled",
+                ebook_access="borrowable",
                 availability_status="borrow_available",
                 providers=[{"price": "9.99 USD", "access": "borrow", "format": "epub", "url": "https://x/1"}],
             ),
             self._solr_doc(
                 key="/works/OLF1W",
                 title="Free Unavailable",
-                ebook_access="printdisabled",
+                ebook_access="borrowable",
                 availability_status="borrow_unavailable",
                 providers=[{"price": "0.00 USD", "access": "borrow", "format": "epub", "url": "https://x/2"}],
             ),
             self._solr_doc(
                 key="/works/OLN1W",
                 title="No Providers",
-                ebook_access="printdisabled",
+                ebook_access="borrowable",
                 availability_status="borrow_available",
                 providers=[],
             ),
@@ -919,7 +931,7 @@ class TestSearchAcquisitionFilterAllModes:
             "title": title,
             "cover_i": 123,
             "description": description,
-            "ebook_access": "printdisabled",
+            "ebook_access": "public",
             "editions": {
                 "docs": [
                     {
@@ -1150,7 +1162,7 @@ class TestSearchTotalsByMode:
                 "key": "/works/OL51W",
                 "title": "Paid",
                 "cover_i": 123,
-                "ebook_access": "printdisabled",
+                "ebook_access": "public",
                 "editions": {
                     "docs": [
                         {
@@ -1167,7 +1179,7 @@ class TestSearchTotalsByMode:
                 "key": "/works/OL52W",
                 "title": "Free",
                 "cover_i": 123,
-                "ebook_access": "printdisabled",
+                "ebook_access": "public",
                 "editions": {
                     "docs": [
                         {
