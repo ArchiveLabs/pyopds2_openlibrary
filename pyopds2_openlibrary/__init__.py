@@ -211,12 +211,18 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
         edition = self.editions.docs[0] if self.editions and self.editions.docs else None
         book = edition or self
 
+        desc = book.description
+        if not desc and self.description:
+            langs = book.language or self.language or []
+            if "eng" in langs:
+                desc = self.description
+
         return Metadata(
             type=self.type,
             title=book.title or self.title or "Untitled",
             subtitle=book.subtitle,
             author=get_authors(),
-            description=strip_markdown(book.description) if book.description else None,
+            description=strip_markdown(desc) if desc else None,
             language=[lang for marc_lang in (book.language or []) if (lang := marc_language_to_iso_639_1(marc_lang))],
             # TODO: Use the edition-specific pagecount
             numberOfPages=self.number_of_pages_median,
@@ -808,7 +814,6 @@ def _align_editions_to_language(
 _AVAILABILITY_MODES: list[tuple[str, str]] = [
     ("everything",     "Everything"),
     ("ebooks",         "Available to Borrow"),
-    ("print_disabled", "Print Disabled"),
     ("open_access",    "Open Access"),
     ("buyable",        "Available for Purchase"),
 ]
@@ -942,6 +947,38 @@ def _build_media_type_links(
     return links
 
 
+# Access options for the Access facet group (OPDS 2.0 §2.4).
+# "general" (default) hides print-disabled content; "print_disabled" shows only that content.
+_ACCESS_OPTIONS: list[tuple[str, str]] = [
+    ("general",        "General"),
+    ("print_disabled", "Print Disabled"),
+]
+
+
+def _build_access_links(
+    access: Optional[str],
+    href_fn: typing.Callable[[str], str],
+) -> list[dict]:
+    """Build the list of access facet link dicts per OPDS 2.0 §2.4.
+
+    Two options: 'General' (default, excludes print-disabled) and 'Print Disabled'
+    (shows only print-disabled content). Print-disabled is hidden by default.
+    """
+    active = access or "general"
+    links = []
+    for ac_code, label in _ACCESS_OPTIONS:
+        link: dict = {
+            "title": label,
+            "href": href_fn(ac_code),
+            "type": "application/opds+json",
+        }
+        if ac_code == active:
+            link["rel"] = "self"
+            link.setdefault("properties", {})["active"] = True
+        links.append(link)
+    return links
+
+
 # ---------------------------------------------------------------------------
 # Homepage carousel group helpers
 # ---------------------------------------------------------------------------
@@ -984,6 +1021,23 @@ def _kids_group(ea: str) -> tuple[str, str, str]:
     return ("Kids", f'{ea} trending_score_hourly_sum:[1 TO *] {_KIDS_SUBJECT_FILTER} -subject:"content_warning:cover"', "random.hourly")
 
 
+_GROUP_DESCRIPTIONS: dict[str, str] = {
+    "Standard Ebooks": (
+        "Standard Ebooks is a volunteer-run project that produces free, carefully "
+        "typeset public-domain ebooks formatted to a consistent standard for modern "
+        "e-readers."
+    ),
+    "Classic Books": (
+        "Beloved works from before 1950 that have been digitized and made available to the public"
+        "available as ebooks."
+    ),
+    "Kids": (
+        "Stories, picture books, and non-fiction for young readers, available on "
+        "Open Library."
+    ),
+}
+
+
 class OpenLibraryDataProvider(DataProvider):
     """Data provider for Open Library records."""
     BASE_URL: str = "https://openlibrary.org"
@@ -1022,10 +1076,10 @@ class OpenLibraryDataProvider(DataProvider):
         internal_query = query
         if mode == 'ebooks' and 'ebook_access:' not in internal_query:
             internal_query = f"{internal_query} ebook_access:[printdisabled TO *]"
-        elif mode == 'print_disabled' and 'ebook_access:' not in internal_query:
-            internal_query = f"{internal_query} ebook_access:printdisabled"
         elif mode == 'open_access' and 'ebook_access:' not in internal_query:
             internal_query = f"{internal_query} ebook_access:public"
+        elif mode == 'print_disabled' and 'ebook_access:' not in internal_query:
+            internal_query = f"{internal_query} ebook_access:printdisabled"
 
         r = _get(
             f"{OpenLibraryDataProvider.BASE_URL}/search.json",
@@ -1085,6 +1139,7 @@ class OpenLibraryDataProvider(DataProvider):
         total: Optional[int] = None,
         availability_counts: Optional[dict[str, int]] = None,
         media_type: Optional[str] = None,
+        access: Optional[str] = None,
     ) -> list[dict]:
         """Build OPDS 2.0 facets for availability and language filtering.
 
@@ -1116,6 +1171,7 @@ class OpenLibraryDataProvider(DataProvider):
             mode_val: str = mode,
             lang_val: Optional[str] = language,
             mt_val: Optional[str] = media_type,
+            ac_val: Optional[str] = access,
         ) -> str:
             # Strip ebook_access filters from the query for "everything" mode
             # so the facet link truly returns all results regardless of how
@@ -1132,6 +1188,8 @@ class OpenLibraryDataProvider(DataProvider):
                 params["language"] = lang_val
             if mt_val:
                 params["media_type"] = mt_val
+            if ac_val and ac_val != "general":
+                params["access"] = ac_val
             if title:
                 params["title"] = title
             return f"{base_url}/search?{urlencode(params)}"
@@ -1163,6 +1221,13 @@ class OpenLibraryDataProvider(DataProvider):
                     href_fn=lambda mt: search_href(mt_val=mt),
                 ),
             },
+            {
+                "metadata": {"title": "Access"},
+                "links": _build_access_links(
+                    access=access,
+                    href_fn=lambda ac: search_href(ac_val=ac),
+                ),
+            },
         ]
 
     @staticmethod
@@ -1171,6 +1236,7 @@ class OpenLibraryDataProvider(DataProvider):
         mode: str = "everything",
         language: Optional[str] = None,
         media_type: Optional[str] = None,
+        access: Optional[str] = None,
     ) -> list[dict]:
         """Build Availability, Language, and Media Type facet groups for the OPDS homepage.
 
@@ -1194,6 +1260,8 @@ class OpenLibraryDataProvider(DataProvider):
                 params["language"] = language
             if media_type:
                 params["media_type"] = media_type
+            if access and access != "general":
+                params["access"] = access
             return f"{base_url}/?{urlencode(params)}" if params else f"{base_url}/"
 
         def lang_href(lang: Optional[str]) -> str:
@@ -1204,6 +1272,8 @@ class OpenLibraryDataProvider(DataProvider):
                 params["language"] = lang
             if media_type:
                 params["media_type"] = media_type
+            if access and access != "general":
+                params["access"] = access
             return f"{base_url}/?{urlencode(params)}" if params else f"{base_url}/"
 
         def mt_href(mt: Optional[str]) -> str:
@@ -1214,6 +1284,20 @@ class OpenLibraryDataProvider(DataProvider):
                 params["language"] = language
             if mt:
                 params["media_type"] = mt
+            if access and access != "general":
+                params["access"] = access
+            return f"{base_url}/?{urlencode(params)}" if params else f"{base_url}/"
+
+        def ac_href(ac: str) -> str:
+            params: dict[str, str] = {}
+            if mode != "everything":
+                params["mode"] = mode
+            if language:
+                params["language"] = language
+            if media_type:
+                params["media_type"] = media_type
+            if ac != "general":
+                params["access"] = ac
             return f"{base_url}/?{urlencode(params)}" if params else f"{base_url}/"
 
         return [
@@ -1239,6 +1323,13 @@ class OpenLibraryDataProvider(DataProvider):
                     href_fn=mt_href,
                 ),
             },
+            {
+                "metadata": {"title": "Access"},
+                "links": _build_access_links(
+                    access=access,
+                    href_fn=ac_href,
+                ),
+            },
         ]
 
     @staticmethod
@@ -1250,6 +1341,7 @@ class OpenLibraryDataProvider(DataProvider):
         media_type: Optional[str] = None,
         page: int = 1,
         limit: int = 25,
+        access: Optional[str] = None,
     ) -> list[dict]:
         """Build Availability, Language, and Media Type facet groups for an author catalog page.
 
@@ -1261,6 +1353,7 @@ class OpenLibraryDataProvider(DataProvider):
             mode_val: str = mode,
             lang_val: Optional[str] = language,
             mt_val: Optional[str] = media_type,
+            ac_val: Optional[str] = access,
         ) -> str:
             params: dict[str, str] = {}
             if page > 1:
@@ -1273,6 +1366,8 @@ class OpenLibraryDataProvider(DataProvider):
                 params["language"] = lang_val
             if mt_val:
                 params["media_type"] = mt_val
+            if ac_val and ac_val != "general":
+                params["access"] = ac_val
             return f"{base_url}/authors/{olid}?{urlencode(params)}" if params else f"{base_url}/authors/{olid}"
 
         return [
@@ -1296,6 +1391,13 @@ class OpenLibraryDataProvider(DataProvider):
                 "links": _build_media_type_links(
                     media_type=media_type,
                     href_fn=lambda mt: author_href(mt_val=mt),
+                ),
+            },
+            {
+                "metadata": {"title": "Access"},
+                "links": _build_access_links(
+                    access=access,
+                    href_fn=lambda ac: author_href(ac_val=ac),
                 ),
             },
         ]
@@ -1380,6 +1482,7 @@ class OpenLibraryDataProvider(DataProvider):
     def _home_page_href(
         base: str, mode: str, language: Optional[str], page: int,
         media_type: Optional[str] = None,
+        access: Optional[str] = None,
     ) -> str:
         """Build a homepage href with pagination."""
         params: dict[str, str] = {}
@@ -1389,6 +1492,8 @@ class OpenLibraryDataProvider(DataProvider):
             params["language"] = language
         if media_type:
             params["media_type"] = media_type
+        if access and access != "general":
+            params["access"] = access
         if page > 1:
             params["page"] = str(page)
         return f"{base}/?{urlencode(params)}" if params else f"{base}/"
@@ -1402,6 +1507,7 @@ class OpenLibraryDataProvider(DataProvider):
         page: int = 1,
         featured_subjects: Optional[list[dict[str, str]]] = None,
         media_type: Optional[str] = None,
+        access: Optional[str] = None,
     ) -> dict:
         """Build a complete OPDS 2.0 homepage catalog dict.
 
@@ -1443,9 +1549,10 @@ class OpenLibraryDataProvider(DataProvider):
                 resp = cls.search(
                     query=query, sort=sort, limit=25,
                     language=language, facets={"mode": mode}, title=title,
-                    media_type=media_type,
+                    media_type=media_type, access=access,
                 )
-                return Catalog.create(metadata=Metadata(title=title), response=resp)
+                desc = _GROUP_DESCRIPTIONS.get(title)
+                return Catalog.create(metadata=Metadata(title=title, description=desc), response=resp)
             except Exception:
                 return None
 
@@ -1491,23 +1598,23 @@ class OpenLibraryDataProvider(DataProvider):
 
         # Links
         links = [
-            Link(rel="self", href=cls._home_page_href(base, mode, language, page, media_type), type=media),
+            Link(rel="self", href=cls._home_page_href(base, mode, language, page, media_type, access), type=media),
             Link(rel="start", href=f"{base}/", type=media),
             Link(rel="search", href=f"{base}/search{{?query}}", type=media, templated=True),
             cls.bookshelf_link(),
             cls.profile_link(),
         ]
         if has_next:
-            links.append(Link(rel="next", href=cls._home_page_href(base, mode, language, page + 1, media_type), type=media))
+            links.append(Link(rel="next", href=cls._home_page_href(base, mode, language, page + 1, media_type, access), type=media))
         if page > 1:
-            links.append(Link(rel="previous", href=cls._home_page_href(base, mode, language, page - 1, media_type), type=media))
+            links.append(Link(rel="previous", href=cls._home_page_href(base, mode, language, page - 1, media_type, access), type=media))
 
         catalog = Catalog(
             metadata=Metadata(title="Open Library"),
             publications=[],
             navigation=navigation,
             groups=loaded_groups,
-            facets=cls.build_home_facets(base, mode, language, media_type),
+            facets=cls.build_home_facets(base, mode, language, media_type, access=access),
             links=links,
         )
         return catalog.model_dump()
@@ -1524,6 +1631,7 @@ class OpenLibraryDataProvider(DataProvider):
         title: Optional[str] = None,
         require_cover: bool = True,
         media_type: Optional[str] = None,
+        access: Optional[str] = None,
     ) -> DataProvider.SearchResponse:
         """
         Search Open Library.
@@ -1640,12 +1748,25 @@ class OpenLibraryDataProvider(DataProvider):
         if media_type == "ebook":
             records = [r for r in records if not r.id_librivox]
 
-        if mode in ('ebooks', 'print_disabled', 'open_access', 'buyable'):
+        # Access filter: control print-disabled visibility.
+        # "general" (default) hides print-disabled books; "print_disabled" shows only them.
+        if access == "print_disabled":
+            records = [r for r in records
+                       if _get_edition_ebook_access(r) == "printdisabled"
+                       or r.ebook_access == "printdisabled"]
+        else:
+            records = [r for r in records
+                       if _get_edition_ebook_access(r) != "printdisabled"
+                       and r.ebook_access != "printdisabled"]
+
+        if access != "print_disabled" and mode in ('ebooks', 'print_disabled', 'open_access', 'buyable'):
             if mode == 'buyable':
                 # Keep only records that have a non-free provider.
                 # This is a client-side filter (Solr has no buyable field).
                 records = [r for r in records if _has_buyable_provider(r)]
             # Sort available books before unavailable, preserving order within each group
+            records.sort(key=lambda r: (0 if _is_currently_available(r) else 1))
+        elif access == "print_disabled":
             records.sort(key=lambda r: (0 if _is_currently_available(r) else 1))
 
         # Strict post-filter: enforce ebook_access boundaries after all edition resolution.
@@ -1655,7 +1776,7 @@ class OpenLibraryDataProvider(DataProvider):
         # "borrowable" should still appear in open_access mode — the Solr query already
         # guaranteed the work is public. For ebooks mode, the work-level OR means a
         # borrowable work whose language-swapped edition is public will still be included.
-        if mode in _EBOOK_MODE_ALLOWED:
+        if access != "print_disabled" and mode in _EBOOK_MODE_ALLOWED:
             allowed = _EBOOK_MODE_ALLOWED[mode]
             records = [r for r in records if _get_edition_ebook_access(r) in allowed or r.ebook_access in allowed]
 
