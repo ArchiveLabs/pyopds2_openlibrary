@@ -1028,7 +1028,7 @@ _GROUP_DESCRIPTIONS: dict[str, str] = {
         "e-readers."
     ),
     "Classic Books": (
-        "Beloved works from before 1950 that have been digitized and made freely "
+        "Beloved works from before 1950 that have been digitized and made available to the public"
         "available as ebooks."
     ),
     "Kids": (
