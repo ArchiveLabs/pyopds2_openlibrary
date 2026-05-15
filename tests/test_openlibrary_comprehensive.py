@@ -1109,6 +1109,28 @@ class TestHomeFeed:
         assert any("ebook_access:[borrowable TO *]" in query for _, query, _ in everything_groups)
         assert any("ebook_access:public" in query for _, query, _ in open_access_groups)
 
+    def test_home_groups_config_excludes_standard_ebooks_for_non_english(self):
+        titles = lambda groups: [t for t, _, _ in groups]
+
+        # English (or no filter) — Standard Ebooks should be present
+        assert "Standard Ebooks" in titles(OpenLibraryDataProvider._home_groups_config("everything"))
+        assert "Standard Ebooks" in titles(OpenLibraryDataProvider._home_groups_config("everything", language="en"))
+        assert "Standard Ebooks" in titles(OpenLibraryDataProvider._home_groups_config("open_access"))
+        assert "Standard Ebooks" in titles(OpenLibraryDataProvider._home_groups_config("open_access", language="en"))
+
+        # Non-English — Standard Ebooks must be absent (it only publishes English)
+        for lang in ("es", "fr", "hi", "de", "zh"):
+            assert "Standard Ebooks" not in titles(
+                OpenLibraryDataProvider._home_groups_config("everything", language=lang)
+            ), f"Standard Ebooks should be excluded for language={lang!r}"
+            assert "Standard Ebooks" not in titles(
+                OpenLibraryDataProvider._home_groups_config("open_access", language=lang)
+            ), f"Standard Ebooks should be excluded (open_access) for language={lang!r}"
+
+        # print_disabled mode never includes Standard Ebooks regardless of language
+        assert "Standard Ebooks" not in titles(OpenLibraryDataProvider._home_groups_config("print_disabled"))
+        assert "Standard Ebooks" not in titles(OpenLibraryDataProvider._home_groups_config("print_disabled", language="en"))
+
     @patch("pyopds2_openlibrary.OpenLibraryDataProvider.search")
     @patch("pyopds2_openlibrary.Catalog")
     def test_build_home_feed_page_one_has_navigation_facets_and_next(self, mock_catalog_cls, mock_search):
