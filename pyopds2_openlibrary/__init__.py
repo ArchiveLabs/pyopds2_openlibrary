@@ -119,6 +119,17 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
 
     @property
     def type(self) -> str:
+        # Prefer the surfaced edition's own provider formats over the work-level
+        # ``id_librivox`` flag: a work can have a LibriVox recording on one
+        # edition while the edition we are returning is an ebook (epub/pdf).
+        edition = self.editions.docs[0] if self.editions and self.editions.docs else None
+        if edition and edition.providers:
+            has_audio = any(p.format == "audio" for p in edition.providers)
+            has_ebook = any(p.format in _DOWNLOADABLE_FORMATS for p in edition.providers)
+            if has_ebook and not has_audio:
+                return "http://schema.org/Book"
+            if has_audio:
+                return "http://schema.org/Audiobook"
         if self.id_librivox:
             return "http://schema.org/Audiobook"
         return "http://schema.org/Book"
@@ -159,12 +170,20 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
 
         # When no audio link was produced by the edition providers but the work
         # has a LibriVox recording, add the LibriVox catalog page as a fallback.
+        # Skip the fallback when the surfaced edition is clearly an ebook
+        # (has epub/pdf providers): a work-level LibriVox recording belongs on
+        # a different edition and would be misleading on an ebook entry.
         has_audio = any(
             lnk.type in ("audio/mpeg", "application/audiobook+json")
             or lnk.href.startswith("https://librivox.org")
             for lnk in links
         )
-        if self.id_librivox and not has_audio:
+        edition_has_ebook = bool(
+            edition
+            and edition.providers
+            and any(p.format in _DOWNLOADABLE_FORMATS for p in edition.providers)
+        )
+        if self.id_librivox and not has_audio and not edition_has_ebook:
             links.append(Link(
                 rel="alternate",
                 href=f"https://librivox.org/{self.id_librivox[0]}",
@@ -231,6 +250,7 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
 
 class OpenLibraryLanguageStub(TypedDict):
     key: str
+    name: Optional[str]
     identifiers: dict[str, list[str]] | None
 
 
@@ -495,6 +515,7 @@ def marc_language_to_iso_639_1(marc_code: str) -> Optional[str]:
 
 
 _languages_map_cache: Optional[dict[str, str]] = None
+_languages_names_cache: dict[str, str] = {}  # iso_639_1 -> display name
 _languages_map_fetched_at: float = 0.0
 _LANGUAGES_MAP_TTL: float = 24 * 60 * 60  # 1 day
 
@@ -502,22 +523,27 @@ _LANGUAGES_MAP_TTL: float = 24 * 60 * 60  # 1 day
 def fetch_languages_map() -> dict[str, str]:
     """Return a map of MARC language codes to ISO 639-1 codes.
 
+    Also populates ``_languages_names_cache`` (iso_639_1 → display name) as a
+    side-effect so ``fetch_language_options`` can build the full language list
+    without a second API call.
+
     Results are cached for ``_LANGUAGES_MAP_TTL`` seconds.  Unlike
     ``@functools.cache``, a failure to fetch does **not** poison the cache —
     the next request will retry the OL API rather than returning stale ``{}``.
     """
-    global _languages_map_cache, _languages_map_fetched_at
+    global _languages_map_cache, _languages_names_cache, _languages_map_fetched_at
     now = _time.monotonic()
     if _languages_map_cache is not None and (now - _languages_map_fetched_at) < _LANGUAGES_MAP_TTL:
         return _languages_map_cache
     try:
-        r = _get("https://openlibrary.org/query.json?type=/type/language&key&identifiers&limit=1000")
+        r = _get("https://openlibrary.org/query.json?type=/type/language&key&name&identifiers&limit=1000")
     except Exception:
         if _languages_map_cache is not None:
             return _languages_map_cache
         raise
     data = cast(List[OpenLibraryLanguageStub], r.json())
     languages: dict[str, str] = {}
+    names: dict[str, str] = {}
     for lang in data:
         marc_code = lang["key"].split("/")[-1]
         identifiers = lang.get("identifiers")
@@ -525,10 +551,42 @@ def fetch_languages_map() -> dict[str, str]:
             continue
         iso_codes = identifiers.get("iso_639_1", [])
         if iso_codes:
-            languages[marc_code] = iso_codes[0]
+            iso = iso_codes[0]
+            languages[marc_code] = iso
+            name = lang.get("name")
+            if name:
+                names[iso] = name
     _languages_map_cache = languages
+    _languages_names_cache = names
     _languages_map_fetched_at = now
     return languages
+
+
+_FALLBACK_LANGUAGE_OPTIONS: list[tuple[Optional[str], str]] = [
+    (None, "All"),
+    ("en", "English"),
+    ("es", "Spanish"),
+    ("fr", "French"),
+    ("hi", "Hindi"),
+]
+
+
+def fetch_language_options() -> list[tuple[Optional[str], str]]:
+    """Return all available language options sorted alphabetically by display name.
+
+    Each entry is ``(iso_639_1_code, display_name)``.  The first entry is
+    always ``(None, "All")`` meaning no language filter.  Falls back to a
+    small hardcoded list if the OL API is unavailable and no cached data exists.
+    """
+    try:
+        fetch_languages_map()
+    except Exception:
+        pass
+    if not _languages_names_cache:
+        return list(_FALLBACK_LANGUAGE_OPTIONS)
+    options: list[tuple[Optional[str], str]] = [(None, "All")]
+    options.extend(sorted(_languages_names_cache.items(), key=lambda x: x[1]))
+    return options
 
 
 _iso_to_marc_cache: dict[str, str] = {}
@@ -818,17 +876,6 @@ _AVAILABILITY_MODES: list[tuple[str, str]] = [
     ("buyable",        "Available for Purchase"),
 ]
 
-# Language options for the Language facet group (OPDS 2.0 §2.4).
-# ``None`` means "no language filter" (All Languages).
-# Language codes follow BCP 47 / ISO 639-1 (e.g. "en" for English).
-_LANGUAGE_OPTIONS: list[tuple[Optional[str], str]] = [
-    (None, "All"),
-    ("en", "English"),
-    ("es", "Spanish"),
-    ("fr", "French"),
-    ("hi", "Hindi"),
-]
-
 # Media type options for the Media Type facet group (OPDS 2.0 §2.4).
 # ``None`` means "no media type filter" (All).
 _MEDIA_TYPE_OPTIONS: list[tuple[Optional[str], str]] = [
@@ -887,8 +934,8 @@ def _build_language_links(
 ) -> list[dict]:
     """Build the list of language facet link dicts per OPDS 2.0 §2.4.
 
-    Iterates ``_LANGUAGE_OPTIONS`` so adding a new language only requires
-    appending to that list — no logic changes needed here.
+    Uses ``fetch_language_options()`` to return all languages available in OL,
+    sorted alphabetically.  Falls back to a small hardcoded list if OL is down.
 
     The currently active language is indicated by ``rel: "self"`` on its link,
     as required by the OPDS 2.0 specification.  ``language=None`` means
@@ -900,7 +947,7 @@ def _build_language_links(
         href_fn: Converts a language code (or ``None``) to a full URL.
     """
     links = []
-    for lang_code, label in _LANGUAGE_OPTIONS:
+    for lang_code, label in fetch_language_options():
         link: dict = {
             "title": label,
             "href": href_fn(lang_code),
@@ -1008,17 +1055,26 @@ def _subject_group(
     ea: str,
     sort: str = "trending",
     extra: str = "",
+    require_trending: bool = True,
 ) -> tuple[str, str, str]:
-    """Build a subject-genre carousel group tuple."""
-    parts = [subject_filter, ea, 'trending_score_hourly_sum:[1 TO *]', '-subject:"content_warning:cover"']
+    """Build a subject-genre carousel group tuple.
+
+    When *require_trending* is False, the ``trending_score_hourly_sum:[1 TO *]``
+    filter is omitted — useful for non-English languages whose books rarely
+    have non-zero trending scores in OL's English-biased ranking signals.
+    """
+    parts = [subject_filter, ea, '-subject:"content_warning:cover"']
+    if require_trending:
+        parts.insert(2, 'trending_score_hourly_sum:[1 TO *]')
     if extra:
         parts.append(extra)
     return (title, " ".join(parts), sort)
 
 
-def _kids_group(ea: str) -> tuple[str, str, str]:
+def _kids_group(ea: str, require_trending: bool = True) -> tuple[str, str, str]:
     """Build the Kids carousel group tuple for a given ebook_access filter."""
-    return ("Kids", f'{ea} trending_score_hourly_sum:[1 TO *] {_KIDS_SUBJECT_FILTER} -subject:"content_warning:cover"', "random.hourly")
+    trending = 'trending_score_hourly_sum:[1 TO *] ' if require_trending else ''
+    return ("Kids", f'{ea} {trending}{_KIDS_SUBJECT_FILTER} -subject:"content_warning:cover"', "random.hourly")
 
 
 _GROUP_DESCRIPTIONS: dict[str, str] = {
@@ -1428,12 +1484,30 @@ class OpenLibraryDataProvider(DataProvider):
     ]
 
     @staticmethod
-    def _home_groups_config(mode: str = "everything") -> list[tuple[str, str, str]]:
+    def _home_groups_config(
+        mode: str = "everything",
+        language: Optional[str] = None,
+    ) -> list[tuple[str, str, str]]:
         """Return the full list of homepage group definitions.
 
         Each entry is ``(title, solr_query, sort)``.  The *mode* parameter
         controls the ``ebook_access`` filter baked into each query.
+
+        Language handling:
+        - ``_STANDARD_EBOOKS_GROUP`` is omitted for non-English languages —
+          Standard Ebooks only publishes English public-domain books.
+        - The ``trending_score_hourly_sum:[1 TO *]`` and ``readinglog_count``
+          filters are dropped for non-English languages because OL's trending
+          and reading-log signals are heavily English-biased; keeping them
+          would cause most genre groups to return 0 results.
         """
+        is_english_or_all = language in (None, "en")
+        include_standard_ebooks = is_english_or_all
+        # Non-English: drop trending_score / readinglog gates so groups have content.
+        require_trending = is_english_or_all
+        trending_filter = 'trending_score_hourly_sum:[1 TO *] ' if require_trending else ''
+        readinglog_filter = ' readinglog_count:[4 TO *]' if require_trending else ''
+
         if mode == "open_access":
             # Public-domain-friendly groups ordered by reliability.
             # Romance, Thrillers, and Textbooks are excluded because post-1928
@@ -1441,15 +1515,19 @@ class OpenLibraryDataProvider(DataProvider):
             # Trending drops readinglog_count so older public-domain classics
             # (which accumulate fewer logs) still surface.
             oa = "ebook_access:public"
-            return [
+            groups: list[tuple[str, str, str]] = [
                 _CLASSIC_BOOKS_GROUP,
-                _STANDARD_EBOOKS_GROUP,
-                ("Trending Books", f'trending_score_hourly_sum:[1 TO *] -subject:"content_warning:cover" {oa}', "trending"),
-                _kids_group(oa),
-                _subject_group("Science", "subject_key:science", oa),
-                _subject_group("History", "subject_key:history", oa),
-                _subject_group("Philosophy", "subject_key:philosophy", oa),
             ]
+            if include_standard_ebooks:
+                groups.append(_STANDARD_EBOOKS_GROUP)
+            groups += [
+                ("Trending Books", f'{trending_filter}-subject:"content_warning:cover" {oa}'.strip(), "trending"),
+                _kids_group(oa, require_trending=require_trending),
+                _subject_group("Science", "subject_key:science", oa, require_trending=require_trending),
+                _subject_group("History", "subject_key:history", oa, require_trending=require_trending),
+                _subject_group("Philosophy", "subject_key:philosophy", oa, require_trending=require_trending),
+            ]
+            return groups
 
         if mode == "print_disabled":
             # Print-disabled groups ordered by density of printdisabled books.
@@ -1459,24 +1537,26 @@ class OpenLibraryDataProvider(DataProvider):
             pd = "ebook_access:printdisabled"
             return [
                 _CLASSIC_BOOKS_GROUP,
-                _kids_group(pd),
+                _kids_group(pd, require_trending=require_trending),
                 ("Textbooks", f'subject_key:textbooks publish_year:[1990 TO *] {pd}', "trending"),
-                ("Trending Books", f'trending_score_hourly_sum:[1 TO *] -subject:"content_warning:cover" {pd}', "trending"),
-                _subject_group("Romance", "subject:romance first_publish_year:[1930 TO *]", pd, sort="trending,trending_score_hourly_sum"),
-                _subject_group("Thrillers", "subject:thrillers", pd, sort="trending,trending_score_hourly_sum"),
-                _subject_group("Science", "subject_key:science", pd),
+                ("Trending Books", f'{trending_filter}-subject:"content_warning:cover" {pd}'.strip(), "trending"),
+                _subject_group("Romance", "subject:romance first_publish_year:[1930 TO *]", pd, sort="trending,trending_score_hourly_sum", require_trending=require_trending),
+                _subject_group("Thrillers", "subject:thrillers", pd, sort="trending,trending_score_hourly_sum", require_trending=require_trending),
+                _subject_group("Science", "subject_key:science", pd, require_trending=require_trending),
             ]
 
         ea = "ebook_access:[borrowable TO *]"
-        return [
-            ("Trending Books", f'trending_score_hourly_sum:[1 TO *] -subject:"content_warning:cover" {ea} readinglog_count:[4 TO *]', "trending"),
+        groups = [
+            ("Trending Books", f'{trending_filter}-subject:"content_warning:cover" {ea}{readinglog_filter}'.strip(), "trending"),
             _CLASSIC_BOOKS_GROUP,
-            _subject_group("Romance", "subject:romance first_publish_year:[1930 TO *]", ea, sort="trending,trending_score_hourly_sum"),
-            _kids_group(ea),
-            _subject_group("Thrillers", "subject:thrillers", ea, sort="trending,trending_score_hourly_sum"),
+            _subject_group("Romance", "subject:romance first_publish_year:[1930 TO *]", ea, sort="trending,trending_score_hourly_sum", require_trending=require_trending),
+            _kids_group(ea, require_trending=require_trending),
+            _subject_group("Thrillers", "subject:thrillers", ea, sort="trending,trending_score_hourly_sum", require_trending=require_trending),
             ("Textbooks", f'subject_key:textbooks publish_year:[1990 TO *] {ea}', "trending"),
-            _STANDARD_EBOOKS_GROUP,
         ]
+        if include_standard_ebooks:
+            groups.append(_STANDARD_EBOOKS_GROUP)
+        return groups
 
     @staticmethod
     def _home_page_href(
@@ -1535,7 +1615,7 @@ class OpenLibraryDataProvider(DataProvider):
         subjects = featured_subjects if featured_subjects is not None else cls.FEATURED_SUBJECTS
         media = cls.OPDS_MEDIA_TYPE
         search_url = cls.SEARCH_URL
-        all_groups = cls._home_groups_config(mode)
+        all_groups = cls._home_groups_config(mode, language)
 
         # Paginate
         per_page = cls.GROUPS_PER_PAGE
@@ -1575,7 +1655,12 @@ class OpenLibraryDataProvider(DataProvider):
         # Navigation — only on page 1 when groups loaded
         navigation: list[Navigation] = []
         if page == 1 and loaded_groups:
-            for subject in subjects:
+            # Standard Ebooks is English-only; hide its nav link for other languages.
+            visible_subjects = [
+                s for s in subjects
+                if s.get("presentable_name") != "Standard Ebooks" or language in (None, "en")
+            ]
+            for subject in visible_subjects:
                 q = subject.get("query") or (
                     f'subject_key:{subject["key"].split("/")[-1]}'
                     f' -subject:"content_warning:cover"'
