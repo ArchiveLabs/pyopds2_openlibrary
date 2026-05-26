@@ -614,9 +614,11 @@ def iso_639_1_to_marc(iso_code: str) -> Optional[str]:
     Uses a reverse-lookup cache built from ``fetch_languages_map()`` to avoid
     a linear scan on every call.  Returns ``None`` if no mapping is found.
     """
+    lang_map = fetch_languages_map()  # MARC → ISO
+    if iso_code in lang_map:
+        return iso_code
     if iso_code in _iso_to_marc_cache:
         return _iso_to_marc_cache[iso_code]
-    lang_map = fetch_languages_map()  # MARC → ISO
     # Rebuild reverse cache from the latest map.
     _iso_to_marc_cache.clear()
     for marc, iso in lang_map.items():
@@ -783,9 +785,9 @@ def _resolve_preferred_edition(
             if edition_docs:
                 ed = OpenLibraryDataRecord.EditionDoc.model_validate(edition_docs[0])
                 # Verify the returned edition actually matches the language.
-                # ed.language stores MARC codes (e.g. "eng"), so compare against
-                # marc_language — not iso_lang, which would never match.
-                if ed.language and marc_language in ed.language:
+                # OpenLibrary search results may surface edition.language as either
+                # MARC ("eng") or ISO ("en") depending on the endpoint/path.
+                if ed.language and (marc_language in ed.language or (iso_lang and iso_lang in ed.language)):
                     return _ResolvedEdition(
                         edition=ed,
                         author_name=docs[0].get("author_name") or None,
