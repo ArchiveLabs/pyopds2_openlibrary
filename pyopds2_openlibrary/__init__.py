@@ -30,6 +30,22 @@ _RETRY_STATUS_CODES: frozenset[int] = frozenset({429, 500, 502, 503, 504})
 _RETRY_DELAYS: tuple[float, ...] = (0.0, 1.0, 2.0)
 # Cap on Retry-After to avoid holding a thread-pool thread for too long.
 _RETRY_AFTER_MAX: float = 10.0
+# Default User-Agent. OpenLibrary's edge blocks the default httpx UA with 403,
+# so every outbound request must identify itself. Consumers should override
+# via ``OpenLibraryDataProvider.USER_AGENT`` to include contact info.
+DEFAULT_USER_AGENT: str = "pyopds2_openlibrary/1.0 (+https://github.com/ArchiveLabs/pyopds2_openlibrary)"
+
+
+def _user_agent() -> str:
+    """Return the active User-Agent string.
+
+    Reads ``OpenLibraryDataProvider.USER_AGENT`` lazily so consumers can
+    override it at runtime; falls back to ``DEFAULT_USER_AGENT`` before the
+    class is defined or if the attribute is unset.
+    """
+    cls = globals().get("OpenLibraryDataProvider")
+    ua = getattr(cls, "USER_AGENT", None) if cls is not None else None
+    return ua or DEFAULT_USER_AGENT
 
 
 def _get(url: str, *, params=None, timeout: float = _REQUEST_TIMEOUT) -> httpx.Response:
@@ -47,7 +63,7 @@ def _get(url: str, *, params=None, timeout: float = _REQUEST_TIMEOUT) -> httpx.R
         if delay:
             _time.sleep(delay)
         try:
-            r = httpx.get(url, params=params, timeout=timeout)
+            r = httpx.get(url, params=params, timeout=timeout, headers={"User-Agent": _user_agent()})
             is_last = i == len(delays) - 1
             if r.status_code in _RETRY_STATUS_CODES and not is_last:
                 # Honour Retry-After on 429; overwrite the *next* scheduled delay.
@@ -598,9 +614,11 @@ def iso_639_1_to_marc(iso_code: str) -> Optional[str]:
     Uses a reverse-lookup cache built from ``fetch_languages_map()`` to avoid
     a linear scan on every call.  Returns ``None`` if no mapping is found.
     """
+    lang_map = fetch_languages_map()  # MARC → ISO
+    if iso_code in lang_map:
+        return iso_code
     if iso_code in _iso_to_marc_cache:
         return _iso_to_marc_cache[iso_code]
-    lang_map = fetch_languages_map()  # MARC → ISO
     # Rebuild reverse cache from the latest map.
     _iso_to_marc_cache.clear()
     for marc, iso in lang_map.items():
@@ -767,7 +785,9 @@ def _resolve_preferred_edition(
             if edition_docs:
                 ed = OpenLibraryDataRecord.EditionDoc.model_validate(edition_docs[0])
                 # Verify the returned edition actually matches the language.
-                if ed.language and iso_lang and iso_lang in ed.language:
+                # OpenLibrary search results may surface edition.language as either
+                # MARC ("eng") or ISO ("en") depending on the endpoint/path.
+                if ed.language and (marc_language in ed.language or (iso_lang and iso_lang in ed.language)):
                     return _ResolvedEdition(
                         edition=ed,
                         author_name=docs[0].get("author_name") or None,
@@ -837,20 +857,20 @@ def _align_editions_to_language(
       ``language:`` filter + ``lang`` param already ensure the right
       edition in almost all cases.
     """
-    marc_lang: Optional[str] = None
-    if resolve_mismatched:
-        marc_lang = iso_639_1_to_marc(language)
+    # ``language`` is ISO 639-1 (e.g. "en"), but edition ``language`` fields
+    # store MARC codes (e.g. "eng"). Convert once so all comparisons match.
+    marc_lang: Optional[str] = iso_639_1_to_marc(language)
     for record in records:
         if not (record.editions and record.editions.docs):
             continue
         if len(record.editions.docs) > 1:
-            matched = [d for d in record.editions.docs if d.language and language in d.language]
-            others = [d for d in record.editions.docs if not (d.language and language in d.language)]
+            matched = [d for d in record.editions.docs if d.language and marc_lang and marc_lang in d.language]
+            others = [d for d in record.editions.docs if not (d.language and marc_lang and marc_lang in d.language)]
             if matched:
                 record.editions.docs = matched + others
         elif resolve_mismatched:
             ed = record.editions.docs[0]
-            if not ed.language or language not in ed.language:
+            if not ed.language or not marc_lang or marc_lang not in ed.language:
                 if marc_lang and record.key:
                     preferred = _resolve_preferred_edition(
                         record.key, marc_lang, _EDITION_RESOLVE_FIELDS
@@ -1084,8 +1104,8 @@ _GROUP_DESCRIPTIONS: dict[str, str] = {
         "e-readers."
     ),
     "Classic Books": (
-        "Beloved works from before 1950 that have been digitized and made available to the public"
-        "available as ebooks."
+        "Beloved works from before 1950 that have been digitized and made "
+        "available to the public as ebooks."
     ),
     "Kids": (
         "Stories, picture books, and non-fiction for young readers, available on "
@@ -1100,6 +1120,7 @@ class OpenLibraryDataProvider(DataProvider):
     OPDS_BASE_URL: Optional[str] = None
     TITLE: str = "OpenLibrary.org OPDS Service"
     SEARCH_URL: str = "/opds/search{?query}"
+    USER_AGENT: str = DEFAULT_USER_AGENT
 
     @classmethod
     def bookshelf_link(cls, host="https://archive.org"):

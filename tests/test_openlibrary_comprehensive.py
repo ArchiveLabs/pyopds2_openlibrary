@@ -728,6 +728,7 @@ class TestGetRetryLogic:
         mock_get.return_value = resp
         assert iso_639_1_to_marc("en") == "eng"
         assert iso_639_1_to_marc("fr") == "fre"
+        assert iso_639_1_to_marc("eng") == "eng"
         assert iso_639_1_to_marc("zz") is None
 
     @patch("pyopds2_openlibrary.httpx.get")
