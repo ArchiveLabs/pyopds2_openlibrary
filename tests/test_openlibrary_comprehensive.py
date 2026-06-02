@@ -1183,7 +1183,9 @@ class TestHomeFeed:
         assert second_nav_qs["query"] == ['publisher:"Custom" ebook_access:public']
 
         called_titles = {call.kwargs["title"] for call in mock_search.call_args_list}
-        expected_titles = {title for title, _, _ in OpenLibraryDataProvider._home_groups_config("everything")[:3]}
+        expected_titles = {
+            title for title, _, _ in OpenLibraryDataProvider._home_groups_config("everything", language="en")
+        }
         assert called_titles == expected_titles
 
     @patch("pyopds2_openlibrary.OpenLibraryDataProvider.search")
