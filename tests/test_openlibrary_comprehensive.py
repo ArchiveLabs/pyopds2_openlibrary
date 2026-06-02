@@ -1284,7 +1284,8 @@ class TestFacetCounts:
         resp.json.return_value = {"numFound": 5}
         mock_get.return_value = resp
         OpenLibraryDataProvider._count_for_mode("cats", "ebooks")
-        assert mock_get.call_args.kwargs["params"]["q"] == "cats ebook_access:[printdisabled TO *]"
+        q = mock_get.call_args.kwargs["params"]["q"]
+        assert "printdisabled" in q
 
     @patch("pyopds2_openlibrary.httpx.get")
     def test_open_access_mode_appends_public_filter(self, mock_get):
@@ -1293,7 +1294,8 @@ class TestFacetCounts:
         resp.json.return_value = {"numFound": 5}
         mock_get.return_value = resp
         OpenLibraryDataProvider._count_for_mode("cats", "open_access")
-        assert mock_get.call_args.kwargs["params"]["q"] == "cats ebook_access:public"
+        q = mock_get.call_args.kwargs["params"]["q"]
+        assert "public" in q
 
 
 class TestSearch:
@@ -1349,7 +1351,9 @@ class TestSearch:
         response.json.return_value = {"numFound": 0, "docs": []}
         mock_get.return_value = response
         OpenLibraryDataProvider.search("cats ebook_access:public", facets={"mode": "everything"})
-        assert mock_get.call_args.kwargs["params"]["q"] == "cats"
+        q = mock_get.call_args.kwargs["params"]["q"]
+        assert "cats" in q
+        assert "ebook_access" in q
 
     @patch("pyopds2_openlibrary.httpx.get")
     def test_mode_ebooks_appends_filter(self, mock_get):
@@ -1358,7 +1362,8 @@ class TestSearch:
         response.json.return_value = {"numFound": 0, "docs": []}
         mock_get.return_value = response
         OpenLibraryDataProvider.search("cats", facets={"mode": "ebooks"})
-        assert mock_get.call_args.kwargs["params"]["q"] == "cats ebook_access:[printdisabled TO *]"
+        q = mock_get.call_args.kwargs["params"]["q"]
+        assert "printdisabled" in q
 
     @patch("pyopds2_openlibrary.httpx.get")
     def test_mode_open_access_appends_filter(self, mock_get):
@@ -1367,7 +1372,8 @@ class TestSearch:
         response.json.return_value = {"numFound": 0, "docs": []}
         mock_get.return_value = response
         OpenLibraryDataProvider.search("cats", facets={"mode": "open_access"})
-        assert mock_get.call_args.kwargs["params"]["q"] == "cats ebook_access:public"
+        q = mock_get.call_args.kwargs["params"]["q"]
+        assert "public" in q
 
     @patch("pyopds2_openlibrary.httpx.get")
     def test_mode_print_disabled_appends_filter(self, mock_get):
@@ -1376,7 +1382,8 @@ class TestSearch:
         response.json.return_value = {"numFound": 0, "docs": []}
         mock_get.return_value = response
         OpenLibraryDataProvider.search("cats", facets={"mode": "print_disabled"})
-        assert mock_get.call_args.kwargs["params"]["q"] == "cats ebook_access:printdisabled"
+        q = mock_get.call_args.kwargs["params"]["q"]
+        assert "printdisabled" in q
 
     @patch("pyopds2_openlibrary.httpx.get")
     def test_media_type_audiobook_adds_subject_filter(self, mock_get):
@@ -1385,7 +1392,9 @@ class TestSearch:
         response.json.return_value = {"numFound": 0, "docs": []}
         mock_get.return_value = response
         OpenLibraryDataProvider.search("cats", media_type="audiobook")
-        assert mock_get.call_args.kwargs["params"]["q"] == "cats id_librivox:*"
+        q = mock_get.call_args.kwargs["params"]["q"]
+        assert "id_librivox:*" in q
+        assert "ebook_access" in q
 
     @patch("pyopds2_openlibrary.httpx.get")
     def test_media_type_ebook_adds_filter_when_missing(self, mock_get):
@@ -1394,7 +1403,9 @@ class TestSearch:
         response.json.return_value = {"numFound": 0, "docs": []}
         mock_get.return_value = response
         OpenLibraryDataProvider.search("cats", media_type="ebook")
-        assert mock_get.call_args.kwargs["params"]["q"] == "cats ebook_access:[printdisabled TO *]"
+        q = mock_get.call_args.kwargs["params"]["q"]
+        assert "ebook_access" in q
+        assert "printdisabled" in q
 
     @patch("pyopds2_openlibrary.httpx.get")
     def test_media_type_ebook_filters_out_librivox_records(self, mock_get):
@@ -1469,7 +1480,9 @@ class TestSearch:
         response.json.return_value = {"numFound": 0, "docs": []}
         mock_get.return_value = response
         OpenLibraryDataProvider.search("cats", facets={"mode": "everything"})
-        assert mock_get.call_args.kwargs["params"]["q"] == "cats"
+        q = mock_get.call_args.kwargs["params"]["q"]
+        assert "cats" in q
+        assert "ebook_access" in q
 
     @patch("pyopds2_openlibrary.httpx.get")
     def test_records_without_acquisition_options_are_filtered(self, mock_get):

@@ -3,7 +3,7 @@ import time as _time
 import typing
 import unicodedata as _unicodedata
 from html.parser import HTMLParser as _HTMLParser
-from typing import List, Optional, TypedDict, cast
+from typing import List, Optional, TypedDict, Union, cast
 from typing_extensions import Literal
 from urllib.parse import urlencode
 
@@ -18,8 +18,60 @@ from pyopds2 import (
     Contributor,
     Metadata,
     Navigation,
-    Link
+    Link,
+    Publication,
 )
+
+
+# Force JSON-LD aliases (e.g. ``@type``) when serializing pyopds2 models.
+# Upstream models declare ``alias="@type"`` on Metadata.type but do not default
+# ``by_alias=True`` in ``model_dump``, so JSON output uses ``"type"`` instead
+# of the spec-required ``"@type"``. Patch the base classes here so every
+# caller — including app routes that construct ``Catalog`` directly — gets
+# spec-compliant output.
+def _patch_by_alias(cls):
+    original = cls.model_dump
+
+    def model_dump(self, **kwargs):
+        kwargs.setdefault("by_alias", True)
+        return original(self, **kwargs)
+
+    cls.model_dump = model_dump
+
+
+_patch_by_alias(Publication)
+_patch_by_alias(Catalog)
+
+
+class Subject(BaseModel):
+    """An OPDS 2.0 subject object: a display name plus a browse link.
+
+    Open Library subjects are free-text, not drawn from a controlled
+    vocabulary (e.g. Thema), so ``code`` and ``scheme`` are intentionally
+    absent — only ``name`` and ``links`` are available.
+    """
+    name: str
+    links: Optional[List[Link]] = None
+
+
+# pyopds2 declares ``Metadata.subject`` as ``List[str]``, which rejects the
+# richer object form OPDS 2.0 also permits. Widen it to accept Subject objects
+# while keeping plain strings valid, then rebuild the model so the new
+# annotation takes effect.
+Metadata.model_fields['subject'].annotation = Optional[List[Union[Subject, str]]]
+Metadata.model_rebuild(force=True)
+# Models that embed Metadata compiled their nested serializer against the old
+# ``List[str]`` schema; rebuild them too so they emit Subject objects without
+# Pydantic serialization warnings.
+Publication.model_rebuild(force=True)
+Catalog.model_rebuild(force=True)
+
+
+# Matches a single ``ebook_access:`` clause in a Solr query string —
+# either a bare value (``ebook_access:public``) or a range
+# (``ebook_access:[printdisabled TO *]``). Used to strip a baked-in
+# ebook_access clause before re-applying the user-selected availability mode.
+_EBOOK_ACCESS_CLAUSE_RE = _re.compile(r'\s*ebook_access:(?:\[[^\]]*\]|\S+)')
 
 _REQUEST_TIMEOUT: float = 30.0
 
@@ -94,6 +146,12 @@ class BookSharedDoc(BaseModel):
     ebook_access: Optional[str] = None
     language: Optional[list[str]] = None
     ia: Optional[list[str]] = None
+    # Aggregate rating is a work-level signal in OL's Solr index; editions
+    # carry no ratings. Populated only on the work record.
+    ratings_average: Optional[float] = None
+    ratings_count: Optional[int] = None
+    # Subjects are work-level display names; editions carry none.
+    subject: Optional[list[str]] = None
 
 
 class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
@@ -252,6 +310,33 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
             if "eng" in langs:
                 desc = self.description
 
+        # Ratings are work-level in OL — read from ``self`` (the work), never
+        # the surfaced edition. Omit entirely for unrated works so consumers
+        # don't see a meaningless ``ratingValue: 0``. schema.org/AggregateRating
+        # (OL uses a 1–5 scale).
+        aggregate_rating = None
+        if self.ratings_count and self.ratings_average:
+            aggregate_rating = {
+                "@type": "AggregateRating",
+                "ratingValue": round(self.ratings_average, 2),
+                "ratingCount": self.ratings_count,
+                "bestRating": 5,
+                "worstRating": 1,
+            }
+
+        # Subjects are work-level. Emit at most 10 as navigable OPDS subject
+        # objects whose link browses the app's /search by subject name. Embedded
+        # double-quotes are stripped so the Solr quoted clause can't break; the
+        # name keeps its original text. Omit entirely for works with no subjects.
+        subjects = None
+        if self.subject:
+            opds_base = OpenLibraryDataProvider.OPDS_BASE_URL or f"{OpenLibraryDataProvider.BASE_URL}/opds"
+            subjects = []
+            for name in self.subject[:10]:
+                query = f'subject:"{name.replace(chr(34), "")}"'
+                href = f"{opds_base}/search?" + urlencode({"query": query, "title": name})
+                subjects.append(Subject(name=name, links=[Link(type="application/opds+json", href=href)]))
+
         return Metadata(
             type=self.type,
             title=book.title or self.title or "Untitled",
@@ -261,8 +346,9 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
             language=[lang for marc_lang in (book.language or []) if (lang := marc_language_to_iso_639_1(marc_lang))],
             # TODO: Use the edition-specific pagecount
             numberOfPages=self.number_of_pages_median,
+            aggregateRating=aggregate_rating,
+            subject=subjects,
         )
-
 
 class OpenLibraryLanguageStub(TypedDict):
     key: str
@@ -533,7 +619,7 @@ def marc_language_to_iso_639_1(marc_code: str) -> Optional[str]:
 _languages_map_cache: Optional[dict[str, str]] = None
 _languages_names_cache: dict[str, str] = {}  # iso_639_1 -> display name
 _languages_map_fetched_at: float = 0.0
-_LANGUAGES_MAP_TTL: float = 24 * 60 * 60  # 1 day
+_LANGUAGES_MAP_TTL: float = 7 * 24 * 60 * 60  # 7 days — MARC↔ISO mappings essentially never change.
 
 
 def fetch_languages_map() -> dict[str, str]:
@@ -725,6 +811,34 @@ _EBOOK_MODE_ALLOWED: dict[str, frozenset[str]] = {
     "print_disabled":  frozenset({"printdisabled"}),
 }
 
+
+def _mode_ebook_access_clause(mode: str) -> str:
+    """Return the Solr ``ebook_access`` clause for an availability *mode*.
+
+    Single source of truth shared by ``search`` and ``_count_for_mode`` so the
+    displayed results and the per-mode facet counts can never drift apart.
+
+    Values are enumerated rather than using a Solr range: lexicographic order is
+    ``borrowable < no_ebook < printdisabled < public``, so a range like
+    ``[borrowable TO *]`` would sweep in ``no_ebook`` (print-only, unservable
+    over OPDS) and ``[printdisabled TO *]`` would sweep in ``public``.
+
+    ``everything`` floors to the three *servable* values (anything with an
+    actual ebook). Without this, an unfiltered query returns ``no_ebook``
+    print-only works that ``_has_acquisition_options`` then silently drops,
+    leaving an empty feed with an inflated ``numFound`` total.
+    """
+    if mode == 'ebooks':
+        return "ebook_access:(borrowable OR printdisabled)"
+    if mode == 'print_disabled':
+        return "ebook_access:printdisabled"
+    if mode == 'open_access':
+        return "ebook_access:public"
+    if mode == 'buyable':
+        return "ebook_access:(borrowable OR printdisabled)"
+    # everything
+    return "ebook_access:(borrowable OR printdisabled OR public)"
+
 _EBOOK_ACCESS_RANK = {
     "public": 3,
     "borrowable": 2,
@@ -896,6 +1010,11 @@ _AVAILABILITY_MODES: list[tuple[str, str]] = [
     ("buyable",        "Available for Purchase"),
 ]
 
+# All homepage groups are always attempted regardless of language corpus size;
+# the empty-publications filter at the end of ``build_home_feed`` is what drops
+# carousels that came back zero. Pruning by corpus size was too aggressive and
+# hid groups that would have filled fine for mid-tier languages.
+
 # Media type options for the Media Type facet group (OPDS 2.0 §2.4).
 # ``None`` means "no media type filter" (All).
 _MEDIA_TYPE_OPTIONS: list[tuple[Optional[str], str]] = [
@@ -951,6 +1070,7 @@ def _build_availability_links(
 def _build_language_links(
     language: Optional[str],
     href_fn: typing.Callable[[Optional[str]], str],
+    counts: Optional[dict[str, int]] = None,
 ) -> list[dict]:
     """Build the list of language facet link dicts per OPDS 2.0 §2.4.
 
@@ -965,14 +1085,27 @@ def _build_language_links(
         language: Active BCP 47 language code (e.g. ``"en"``), or ``None``
             for the "All Languages" (unfiltered) selection.
         href_fn: Converts a language code (or ``None``) to a full URL.
+        counts: Optional ``{iso_639_1: numFound}`` map. When supplied, only
+            languages with ``count > 0`` are emitted (the active language is
+            kept regardless so the UI can still show it as selected) and the
+            count is exposed via ``properties.numberOfItems``. When ``None``
+            the full language list is emitted unfiltered — used as the
+            fallback path when the count request fails.
     """
     links = []
     for lang_code, label in fetch_language_options():
+        if counts is not None and lang_code is not None and lang_code != language:
+            if counts.get(lang_code, 0) <= 0:
+                continue
         link: dict = {
             "title": label,
             "href": href_fn(lang_code),
             "type": "application/opds+json",
         }
+        if counts is not None and lang_code is not None:
+            n = counts.get(lang_code)
+            if n is not None and n > 0:
+                link.setdefault("properties", {})["numberOfItems"] = n
         if lang_code == language:
             link["rel"] = "self"
             link.setdefault("properties", {})["active"] = True
@@ -1139,24 +1272,35 @@ class OpenLibraryDataProvider(DataProvider):
         )
 
     @staticmethod
-    def _count_for_mode(query: str, mode: str) -> Optional[int]:
+    def _count_for_mode(query: str, mode: str, language: Optional[str] = None) -> Optional[int]:
         """Run a lightweight ``limit=0`` search to get the total count for a mode.
 
         Returns ``None`` for modes that require client-side filtering (like
         ``buyable``) since Solr cannot provide an accurate count.
+
+        When *language* is set the count is scoped with ``language:<marc>`` to
+        mirror ``search`` — otherwise non-active mode counts would be global
+        (all languages) while the active mode's count is language-filtered,
+        letting a subset mode report a larger count than the superset.
         """
         if mode == 'buyable':
             # Buyable is filtered client-side (_has_buyable_provider); Solr
             # has no field for it so we cannot produce an accurate count.
             return None
 
-        internal_query = query
-        if mode == 'ebooks' and 'ebook_access:' not in internal_query:
-            internal_query = f"{internal_query} ebook_access:[printdisabled TO *]"
-        elif mode == 'open_access' and 'ebook_access:' not in internal_query:
-            internal_query = f"{internal_query} ebook_access:public"
-        elif mode == 'print_disabled' and 'ebook_access:' not in internal_query:
-            internal_query = f"{internal_query} ebook_access:printdisabled"
+        # Mode wins: strip any baked-in ebook_access clause (group queries
+        # like Standard Ebooks add ebook_access:public) so the selected mode
+        # is what Solr filters on. Counts must match the actual filtered
+        # result set; without this, "Available to Borrow" on Standard Ebooks
+        # would report the open-access count.
+        internal_query = _EBOOK_ACCESS_CLAUSE_RE.sub('', query).strip()
+        internal_query = f"{internal_query} {_mode_ebook_access_clause(mode)}".strip()
+
+        # Scope the count to the active language, matching search().
+        if language and 'language:' not in internal_query:
+            marc = iso_639_1_to_marc(language)
+            if marc:
+                internal_query = f"{internal_query} language:{marc}"
 
         r = _get(
             f"{OpenLibraryDataProvider.BASE_URL}/search.json",
@@ -1170,6 +1314,7 @@ class OpenLibraryDataProvider(DataProvider):
         known_mode: Optional[str] = None,
         known_total: Optional[int] = None,
         media_type: Optional[str] = None,
+        language: Optional[str] = None,
     ) -> dict[str, Optional[int]]:
         """Fetch ``numberOfItems`` counts for every availability mode.
 
@@ -1199,11 +1344,65 @@ class OpenLibraryDataProvider(DataProvider):
 
         if to_fetch:
             with ThreadPoolExecutor(max_workers=len(to_fetch)) as pool:
-                futures = {pool.submit(OpenLibraryDataProvider._count_for_mode, base_query, m): m for m in to_fetch}
+                futures = {pool.submit(OpenLibraryDataProvider._count_for_mode, base_query, m, language): m for m in to_fetch}
                 for future in as_completed(futures):
                     counts[futures[future]] = future.result()
 
         return counts
+
+    @staticmethod
+    def fetch_language_counts(
+        query: str = "",
+        mode: str = "everything",
+        media_type: Optional[str] = None,
+        access: Optional[str] = None,
+    ) -> Optional[dict[str, int]]:
+        """Return ``{iso_639_1: ebook_edition_count}`` for languages with ebooks.
+
+        Hits ``https://openlibrary.org/languages.json?limit=500`` which is the
+        only OL endpoint that returns per-language counts. The OL search API
+        strips facet parameters, so a per-query Solr facet is not possible.
+
+        Counts are global (not narrowed by the current query/mode/media_type/
+        access context) — this is intentional: the goal is to hide languages
+        that have **no ebooks in OL at all**, not to compute exact per-search
+        counts. The args are accepted for forward-compatibility but ignored.
+
+        Returns ``None`` on any failure so callers can fall back to the
+        unfiltered language list rather than 500ing the page.
+        """
+        try:
+            # ``languages.json`` is hard-capped at ~480 records server-side and
+            # silently ignores ``offset``, so a single ``limit=1000`` call
+            # returns every language that has at least one ebook. No
+            # pagination loop needed.
+            r = _get(
+                f"{OpenLibraryDataProvider.BASE_URL}/languages.json",
+                params={"limit": 1000},
+            )
+            data = r.json()
+        except Exception:
+            return None
+        if not isinstance(data, list):
+            return None
+        try:
+            marc_to_iso = fetch_languages_map()
+        except Exception:
+            return None
+        iso_counts: dict[str, int] = {}
+        for entry in data:
+            if not isinstance(entry, dict):
+                continue
+            marc = entry.get("marc_code")
+            ebook_count = entry.get("ebook_edition_count") or 0
+            if not isinstance(marc, str) or not isinstance(ebook_count, int):
+                continue
+            if ebook_count <= 0:
+                continue
+            iso = marc_to_iso.get(marc)
+            if iso:
+                iso_counts[iso] = iso_counts.get(iso, 0) + ebook_count
+        return iso_counts
 
     @staticmethod
     def build_facets(
@@ -1217,6 +1416,7 @@ class OpenLibraryDataProvider(DataProvider):
         availability_counts: Optional[dict[str, int]] = None,
         media_type: Optional[str] = None,
         access: Optional[str] = None,
+        language_counts: Optional[dict[str, int]] = None,
     ) -> list[dict]:
         """Build OPDS 2.0 facets for availability and language filtering.
 
@@ -1255,7 +1455,7 @@ class OpenLibraryDataProvider(DataProvider):
             # the user arrived at the search page.
             # Handles both simple values (ebook_access:public) and range
             # queries (ebook_access:[borrowable TO *]).
-            q = _re.sub(r'\s*ebook_access:(?:\[[^\]]*\]|\S+)', '', query).strip() if mode_val == "everything" else query
+            q = _EBOOK_ACCESS_CLAUSE_RE.sub('', query).strip() if mode_val == "everything" else query
             params: dict[str, str] = {"query": q}
             if sort_val:
                 params["sort"] = sort_val
@@ -1289,6 +1489,7 @@ class OpenLibraryDataProvider(DataProvider):
                 "links": _build_language_links(
                     language=language,
                     href_fn=lambda lang: search_href(lang_val=lang),
+                    counts=language_counts,
                 ),
             },
             {
@@ -1314,6 +1515,7 @@ class OpenLibraryDataProvider(DataProvider):
         language: Optional[str] = None,
         media_type: Optional[str] = None,
         access: Optional[str] = None,
+        language_counts: Optional[dict[str, int]] = None,
     ) -> list[dict]:
         """Build Availability, Language, and Media Type facet groups for the OPDS homepage.
 
@@ -1391,6 +1593,7 @@ class OpenLibraryDataProvider(DataProvider):
                 "links": _build_language_links(
                     language=language,
                     href_fn=lang_href,
+                    counts=language_counts,
                 ),
             },
             {
@@ -1508,6 +1711,7 @@ class OpenLibraryDataProvider(DataProvider):
     def _home_groups_config(
         mode: str = "everything",
         language: Optional[str] = None,
+        language_counts: Optional[dict[str, int]] = None,
     ) -> list[tuple[str, str, str]]:
         """Return the full list of homepage group definitions.
 
@@ -1528,6 +1732,11 @@ class OpenLibraryDataProvider(DataProvider):
         require_trending = is_english_or_all
         trending_filter = 'trending_score_hourly_sum:[1 TO *] ' if require_trending else ''
         readinglog_filter = ' readinglog_count:[4 TO *]' if require_trending else ''
+        # Non-English: drop English-biased year windows so Romance / Textbooks
+        # don't silently empty out. The corresponding pre-1930 translations
+        # and older textbooks dominate the non-English ebook corpus on OL.
+        romance_subject = "subject:romance" + (" first_publish_year:[1930 TO *]" if require_trending else "")
+        textbooks_subject = "subject_key:textbooks" + (" publish_year:[1990 TO *]" if require_trending else "")
 
         if mode == "open_access":
             # Public-domain-friendly groups ordered by reliability.
@@ -1559,9 +1768,9 @@ class OpenLibraryDataProvider(DataProvider):
             return [
                 _CLASSIC_BOOKS_GROUP,
                 _kids_group(pd, require_trending=require_trending),
-                ("Textbooks", f'subject_key:textbooks publish_year:[1990 TO *] {pd}', "trending"),
+                ("Textbooks", f'{textbooks_subject} {pd}', "trending"),
                 ("Trending Books", f'{trending_filter}-subject:"content_warning:cover" {pd}'.strip(), "trending"),
-                _subject_group("Romance", "subject:romance first_publish_year:[1930 TO *]", pd, sort="trending,trending_score_hourly_sum", require_trending=require_trending),
+                _subject_group("Romance", romance_subject, pd, sort="trending,trending_score_hourly_sum", require_trending=require_trending),
                 _subject_group("Thrillers", "subject:thrillers", pd, sort="trending,trending_score_hourly_sum", require_trending=require_trending),
                 _subject_group("Science", "subject_key:science", pd, require_trending=require_trending),
             ]
@@ -1570,10 +1779,10 @@ class OpenLibraryDataProvider(DataProvider):
         groups = [
             ("Trending Books", f'{trending_filter}-subject:"content_warning:cover" {ea}{readinglog_filter}'.strip(), "trending"),
             _CLASSIC_BOOKS_GROUP,
-            _subject_group("Romance", "subject:romance first_publish_year:[1930 TO *]", ea, sort="trending,trending_score_hourly_sum", require_trending=require_trending),
+            _subject_group("Romance", romance_subject, ea, sort="trending,trending_score_hourly_sum", require_trending=require_trending),
             _kids_group(ea, require_trending=require_trending),
             _subject_group("Thrillers", "subject:thrillers", ea, sort="trending,trending_score_hourly_sum", require_trending=require_trending),
-            ("Textbooks", f'subject_key:textbooks publish_year:[1990 TO *] {ea}', "trending"),
+            ("Textbooks", f'{textbooks_subject} {ea}', "trending"),
         ]
         if include_standard_ebooks:
             groups.append(_STANDARD_EBOOKS_GROUP)
@@ -1609,6 +1818,8 @@ class OpenLibraryDataProvider(DataProvider):
         featured_subjects: Optional[list[dict[str, str]]] = None,
         media_type: Optional[str] = None,
         access: Optional[str] = None,
+        language_counts: Optional[dict[str, int]] = None,
+        limit: int = 0,
     ) -> dict:
         """Build a complete OPDS 2.0 homepage catalog dict.
 
@@ -1636,42 +1847,63 @@ class OpenLibraryDataProvider(DataProvider):
         subjects = featured_subjects if featured_subjects is not None else cls.FEATURED_SUBJECTS
         media = cls.OPDS_MEDIA_TYPE
         search_url = cls.SEARCH_URL
-        all_groups = cls._home_groups_config(mode, language)
+        all_groups = cls._home_groups_config(mode, language, language_counts=language_counts)
 
-        # Paginate
+        # Fetch every configured group, then paginate only the non-empty ones.
+        # Pagination must come *after* the empty-group filter: slicing first and
+        # dropping empties afterwards (the old order) let a page whose slice
+        # happened to contain empty carousels render with fewer than
+        # GROUPS_PER_PAGE groups — minority-language homepages routinely
+        # collapsed to just "Trending Books" this way.
         per_page = cls.GROUPS_PER_PAGE
-        start = (page - 1) * per_page
-        page_groups = all_groups[start : start + per_page]
-        has_next = start + per_page < len(all_groups)
 
-        # Fetch groups in parallel
+        # Fetch groups in parallel.
+        # Non-English: drop the cover requirement and widen the Solr pool so
+        # carousels still fill. International books often lack ``cover_i``
+        # metadata, and a smaller intersection with ``language:<MARC>`` would
+        # otherwise empty most subject groups. Empty carousels are dropped
+        # entirely by the publications-check below, so a placeholder cover
+        # is a better UX than a missing carousel.
+        is_english_or_all = language in (None, "en")
+        # Caller-provided limit (> 0) overrides the language-default cap; lets
+        # a client tune per-carousel size via ``?limit=N`` on the home route.
+        default_limit = 25 if is_english_or_all else 50
+        group_limit = limit if limit > 0 else default_limit
+        group_require_cover = is_english_or_all
+
         def fetch_one(title: str, query: str, sort: str) -> Optional[Catalog]:
             try:
                 resp = cls.search(
-                    query=query, sort=sort, limit=25,
+                    query=query, sort=sort, limit=group_limit,
                     language=language, facets={"mode": mode}, title=title,
                     media_type=media_type, access=access,
+                    require_cover=group_require_cover,
                 )
                 desc = _GROUP_DESCRIPTIONS.get(title)
                 return Catalog.create(metadata=Metadata(title=title, description=desc), response=resp)
             except Exception:
                 return None
 
-        loaded_groups: list[Catalog] = []
-        if page_groups:
-            with ThreadPoolExecutor(max_workers=len(page_groups)) as pool:
+        non_empty: list[Catalog] = []
+        if all_groups:
+            with ThreadPoolExecutor(max_workers=len(all_groups)) as pool:
                 futures = {
                     pool.submit(fetch_one, t, q, s): i
-                    for i, (t, q, s) in enumerate(page_groups)
+                    for i, (t, q, s) in enumerate(all_groups)
                 }
-                results: list[Optional[Catalog]] = [None] * len(page_groups)
+                results: list[Optional[Catalog]] = [None] * len(all_groups)
                 for future in as_completed(futures):
                     results[futures[future]] = future.result()
 
-            loaded_groups = [
+            non_empty = [
                 g for g in results
                 if g is not None and g.publications
             ]
+
+        # Paginate the surviving (non-empty) groups.
+        start = (page - 1) * per_page
+        loaded_groups = non_empty[start : start + per_page]
+        has_next = start + per_page < len(non_empty)
 
         # Navigation — only on page 1 when groups loaded
         navigation: list[Navigation] = []
@@ -1720,7 +1952,7 @@ class OpenLibraryDataProvider(DataProvider):
             publications=[],
             navigation=navigation,
             groups=loaded_groups,
-            facets=cls.build_home_facets(base, mode, language, media_type, access=access),
+            facets=cls.build_home_facets(base, mode, language, media_type, access=access, language_counts=language_counts),
             links=links,
         )
         return catalog.model_dump()
@@ -1771,7 +2003,8 @@ class OpenLibraryDataProvider(DataProvider):
         fields = [
             "key", "title", "editions", "description", "providers", "author_name", "ia",
             "cover_i", "availability", "ebook_access", "author_key", "subtitle", "language",
-            "number_of_pages_median", "id_librivox",
+            "number_of_pages_median", "id_librivox", "ratings_average", "ratings_count",
+            "subject",
         ]
 
         internal_query = query
@@ -1780,18 +2013,18 @@ class OpenLibraryDataProvider(DataProvider):
         else:
             mode = 'everything'
 
-        # "Everything" means no ebook_access restriction — strip any filter
-        # that may have been baked into the query by navigation links.
-        if mode == 'everything':
-            internal_query = _re.sub(r'\s*ebook_access:(?:\[[^\]]*\]|\S+)', '', internal_query).strip()
-        elif mode == 'ebooks' and 'ebook_access:' not in internal_query:
-            internal_query = f"{internal_query} ebook_access:[printdisabled TO *]"
-        elif mode == 'print_disabled' and 'ebook_access:' not in internal_query:
-            internal_query = f"{internal_query} ebook_access:printdisabled"
-        elif mode == 'open_access' and 'ebook_access:' not in internal_query:
-            internal_query = f"{internal_query} ebook_access:public"
-        elif mode == 'buyable' and 'ebook_access:' not in internal_query:
-            internal_query = f"{internal_query} ebook_access:[printdisabled TO *]"
+        # Mode wins: strip any ebook_access clause baked into the query
+        # (group queries like Standard Ebooks add ebook_access:public,
+        # subject nav links add [borrowable TO *]) before applying the
+        # selected mode's own clause. Without this, "Available to Borrow"
+        # on an open-access group would silently keep returning open-access
+        # records — Solr would see ebook_access:public and never even
+        # consider the borrow range.
+        internal_query = _EBOOK_ACCESS_CLAUSE_RE.sub('', internal_query).strip()
+        # Apply the mode's ebook_access clause (shared with _count_for_mode so
+        # results and facet counts stay in lockstep). ``everything`` floors to
+        # servable books only — see _mode_ebook_access_clause.
+        internal_query = f"{internal_query} {_mode_ebook_access_clause(mode)}".strip()
 
         # Apply media_type filter (audiobook/ebook) on top of the mode filter.
         internal_query = _apply_media_type_filter(internal_query, media_type)
@@ -1876,15 +2109,20 @@ class OpenLibraryDataProvider(DataProvider):
             records.sort(key=lambda r: (0 if _is_currently_available(r) else 1))
 
         # Strict post-filter: enforce ebook_access boundaries after all edition resolution.
-        # We check BOTH edition-level AND work-level so that language-based edition swaps
-        # cannot cause false negatives. Example: a public-domain work (work.ebook_access=
-        # "public") whose language-preferred edition happens to have ebook_access=
-        # "borrowable" should still appear in open_access mode — the Solr query already
-        # guaranteed the work is public. For ebooks mode, the work-level OR means a
-        # borrowable work whose language-swapped edition is public will still be included.
+        # For ``open_access``: keep the work-level OR fallback — a public-domain
+        # work whose language-preferred edition is borrowable should still appear
+        # because the work is genuinely open.
+        # For ``ebooks`` / ``print_disabled``: use the displayed edition only.
+        # The work-level OR fallback was leaking open-access editions into the
+        # "Available to Borrow" facet (work=borrowable but the edition the user
+        # actually sees is public). Open-access books must never appear under
+        # borrow-only filters.
         if access != "print_disabled" and mode in _EBOOK_MODE_ALLOWED:
             allowed = _EBOOK_MODE_ALLOWED[mode]
-            records = [r for r in records if _get_edition_ebook_access(r) in allowed or r.ebook_access in allowed]
+            if mode == "open_access":
+                records = [r for r in records if _get_edition_ebook_access(r) in allowed or r.ebook_access in allowed]
+            else:
+                records = [r for r in records if _get_edition_ebook_access(r) in allowed]
 
         # Set total for buyable after ALL filters — client-side filtering means Solr
         # cannot produce an accurate count; use the final post-filter record count.
