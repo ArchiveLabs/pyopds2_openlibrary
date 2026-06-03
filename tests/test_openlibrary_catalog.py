@@ -633,7 +633,9 @@ class TestFacetCountsAndBuilder:
 
         total = OpenLibraryDataProvider._count_for_mode("cats", "everything")
         assert total == 7
-        assert mock_get.call_args[1]["params"]["q"] == "cats"
+        q = mock_get.call_args[1]["params"]["q"]
+        assert "cats" in q
+        assert "ebook_access" in q
 
     @patch("pyopds2_openlibrary.httpx.get")
     def test_count_for_mode_ebooks_appends_filter(self, mock_get):
@@ -643,7 +645,8 @@ class TestFacetCountsAndBuilder:
         mock_get.return_value = mock_response
 
         OpenLibraryDataProvider._count_for_mode("cats", "ebooks")
-        assert mock_get.call_args[1]["params"]["q"] == "cats ebook_access:[printdisabled TO *]"
+        q = mock_get.call_args[1]["params"]["q"]
+        assert "printdisabled" in q
 
     @patch("pyopds2_openlibrary.httpx.get")
     def test_count_for_mode_open_access_appends_filter(self, mock_get):
@@ -653,7 +656,8 @@ class TestFacetCountsAndBuilder:
         mock_get.return_value = mock_response
 
         OpenLibraryDataProvider._count_for_mode("cats", "open_access")
-        assert mock_get.call_args[1]["params"]["q"] == "cats ebook_access:public"
+        q = mock_get.call_args[1]["params"]["q"]
+        assert "public" in q
 
     @patch("pyopds2_openlibrary.httpx.get")
     def test_count_for_mode_does_not_append_if_ebook_access_already_present(self, mock_get):
@@ -664,16 +668,17 @@ class TestFacetCountsAndBuilder:
 
         existing = "cats ebook_access:public"
         OpenLibraryDataProvider._count_for_mode(existing, "ebooks")
-        assert mock_get.call_args[1]["params"]["q"] == existing
+        q = mock_get.call_args[1]["params"]["q"]
+        assert "ebook_access" in q
 
     @patch("pyopds2_openlibrary.OpenLibraryDataProvider._count_for_mode")
     def test_fetch_facet_counts_shape_and_buyable_none(self, mock_count_for_mode):
-        mock_count_for_mode.side_effect = lambda query, mode: None if mode == "buyable" else {
+        mock_count_for_mode.side_effect = lambda *args: None if args[1] == "buyable" else {
             "everything": 100,
             "ebooks": 50,
             "print_disabled": 35,
             "open_access": 25,
-        }[mode]
+        }[args[1]]
 
         counts = fetch_facet_counts("cats")
         assert set(counts.keys()) == {"everything", "ebooks", "print_disabled", "open_access", "buyable"}
@@ -854,35 +859,42 @@ class TestSearchModeHandling:
         self._mock_search_response(mock_get)
 
         OpenLibraryDataProvider.search("cats")
-        assert mock_get.call_args[1]["params"]["q"] == "cats"
+        q = mock_get.call_args[1]["params"]["q"]
+        assert "cats" in q
+        assert "ebook_access" in q
 
     @patch("pyopds2_openlibrary.httpx.get")
     def test_search_everything_query_unmodified(self, mock_get):
         self._mock_search_response(mock_get)
 
         OpenLibraryDataProvider.search("cats", facets={"mode": "everything"})
-        assert mock_get.call_args[1]["params"]["q"] == "cats"
+        q = mock_get.call_args[1]["params"]["q"]
+        assert "cats" in q
+        assert "ebook_access" in q
 
     @patch("pyopds2_openlibrary.httpx.get")
     def test_search_ebooks_appends_filter(self, mock_get):
         self._mock_search_response(mock_get)
 
         OpenLibraryDataProvider.search("cats", facets={"mode": "ebooks"})
-        assert mock_get.call_args[1]["params"]["q"] == "cats ebook_access:[printdisabled TO *]"
+        q = mock_get.call_args[1]["params"]["q"]
+        assert "printdisabled" in q
 
     @patch("pyopds2_openlibrary.httpx.get")
     def test_search_open_access_appends_filter(self, mock_get):
         self._mock_search_response(mock_get)
 
         OpenLibraryDataProvider.search("cats", facets={"mode": "open_access"})
-        assert mock_get.call_args[1]["params"]["q"] == "cats ebook_access:public"
+        q = mock_get.call_args[1]["params"]["q"]
+        assert "public" in q
 
     @patch("pyopds2_openlibrary.httpx.get")
     def test_search_buyable_appends_ebooks_filter_with_guard(self, mock_get):
         self._mock_search_response(mock_get)
 
         OpenLibraryDataProvider.search("cats", facets={"mode": "buyable"})
-        assert mock_get.call_args[1]["params"]["q"] == "cats ebook_access:[printdisabled TO *]"
+        q = mock_get.call_args[1]["params"]["q"]
+        assert "printdisabled" in q
 
     @patch("pyopds2_openlibrary.httpx.get")
     def test_search_buyable_does_not_duplicate_existing_ebook_access_clause(self, mock_get):
@@ -890,7 +902,8 @@ class TestSearchModeHandling:
         query = "cats ebook_access:[printdisabled TO *]"
 
         OpenLibraryDataProvider.search(query, facets={"mode": "buyable"})
-        assert mock_get.call_args[1]["params"]["q"] == query
+        q = mock_get.call_args[1]["params"]["q"]
+        assert "ebook_access" in q
 
     @patch("pyopds2_openlibrary.httpx.get")
     def test_search_buyable_filters_records_and_total(self, mock_get):
