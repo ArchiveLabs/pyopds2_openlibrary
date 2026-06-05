@@ -328,14 +328,18 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
         # objects whose link browses the app's /search by subject name. Embedded
         # double-quotes are stripped so the Solr quoted clause can't break; the
         # name keeps its original text. Omit entirely for works with no subjects.
+        # Colon-separated subjects (e.g. ``content_warning:cover``) are machine
+        # tags, not human-readable, so they are filtered out before slicing.
         subjects = None
         if self.subject:
             opds_base = OpenLibraryDataProvider.OPDS_BASE_URL or f"{OpenLibraryDataProvider.BASE_URL}/opds"
             subjects = []
-            for name in self.subject[:10]:
+            human_readable = [name for name in self.subject if ":" not in name]
+            for name in human_readable[:10]:
                 query = f'subject:"{name.replace(chr(34), "")}"'
                 href = f"{opds_base}/search?" + urlencode({"query": query, "title": name})
                 subjects.append(Subject(name=name, links=[Link(type="application/opds+json", href=href)]))
+            subjects = subjects or None
 
         return Metadata(
             type=self.type,
