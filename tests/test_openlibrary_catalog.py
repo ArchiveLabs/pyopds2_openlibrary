@@ -16,6 +16,7 @@ from pyopds2_openlibrary import (
     _resolve_preferred_edition,
     fetch_languages_map,
     ol_acquisition_to_opds_links,
+    Subject,
 )
 
 build_facets = OpenLibraryDataProvider.build_facets
@@ -194,6 +195,22 @@ class TestOpenLibraryDataRecord:
         assert len(metadata.author) == 1
         assert metadata.author[0].name == "Test Author"
         assert metadata.numberOfPages == 200
+
+    def test_subjects_filter_out_machine_tags(self):
+        """Subjects containing machine tags (colon-separated) are filtered out."""
+        record = OpenLibraryDataRecord(
+            key="/works/OLSUB1W",
+            title="Subject Test",
+            subject=["Fiction", "content_warning:cover", "genre:fiction"]
+        )
+
+        metadata = record.metadata()
+
+        assert metadata.subject is not None
+        # Names should not contain machine-tag colons
+        names = [s.name if isinstance(s, Subject) else s for s in metadata.subject]
+        assert "Fiction" in names
+        assert all(":" not in name for name in names)
 
     def test_record_links(self):
         """Test link generation from a record."""
