@@ -1,4 +1,5 @@
 import re as _re
+import threading as _threading
 import time as _time
 import typing
 import unicodedata as _unicodedata
@@ -100,6 +101,32 @@ def _user_agent() -> str:
     return ua or DEFAULT_USER_AGENT
 
 
+_http_client: "httpx.Client | None" = None
+_http_client_lock = _threading.Lock()
+
+
+def _get_http_client() -> "httpx.Client":
+    """Return the shared httpx.Client singleton (thread-safe, lazy init)."""
+    global _http_client
+    if _http_client is None:
+        with _http_client_lock:
+            if _http_client is None:
+                _http_client = httpx.Client(
+                    limits=httpx.Limits(
+                        max_keepalive_connections=10,
+                        max_connections=20,
+                        keepalive_expiry=30.0,
+                    ),
+                    timeout=httpx.Timeout(
+                        connect=5.0,
+                        read=_REQUEST_TIMEOUT,
+                        write=5.0,
+                        pool=2.0,
+                    ),
+                )
+    return _http_client
+
+
 def _get(url: str, *, params=None, timeout: float = _REQUEST_TIMEOUT) -> httpx.Response:
     """``httpx.get`` with automatic retry on transient HTTP/network errors.
 
@@ -115,7 +142,7 @@ def _get(url: str, *, params=None, timeout: float = _REQUEST_TIMEOUT) -> httpx.R
         if delay:
             _time.sleep(delay)
         try:
-            r = httpx.get(url, params=params, timeout=timeout, headers={"User-Agent": _user_agent()})
+            r = _get_http_client().get(url, params=params, timeout=timeout, headers={"User-Agent": _user_agent()})
             is_last = i == len(delays) - 1
             if r.status_code in _RETRY_STATUS_CODES and not is_last:
                 # Honour Retry-After on 429; overwrite the *next* scheduled delay.
