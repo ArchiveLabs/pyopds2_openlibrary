@@ -655,16 +655,19 @@ class TestGetRetryLogic:
         result = openlibrary._get("https://example.org")
 
         assert result.status_code == 200
-        mock_sleep.assert_any_call(10.0)
+        # Retry-After capped at 10.0, then jittered by up to +0.5 (see _get).
+        assert any(10.0 <= call.args[0] < 10.5 for call in mock_sleep.call_args_list)
 
+    @patch("pyopds2_openlibrary._time.sleep")
     @patch("pyopds2_openlibrary.httpx.get")
-    def test_persistent_5xx_raises_after_retries_exhausted(self, mock_get):
-        mock_get.side_effect = [self._response(500), self._response(502), self._response(503)]
+    def test_persistent_5xx_raises_after_retries_exhausted(self, mock_get, mock_sleep):
+        attempts = len(openlibrary._RETRY_DELAYS)
+        mock_get.side_effect = [self._response(503) for _ in range(attempts)]
 
         with pytest.raises(httpx.HTTPStatusError):
             openlibrary._get("https://example.org")
 
-        assert mock_get.call_count == 3
+        assert mock_get.call_count == attempts
 
     @patch("pyopds2_openlibrary.httpx.get")
     def test_404_raises_without_retry(self, mock_get):
@@ -675,14 +678,16 @@ class TestGetRetryLogic:
 
         mock_get.assert_called_once()
 
+    @patch("pyopds2_openlibrary._time.sleep")
     @patch("pyopds2_openlibrary.httpx.get")
-    def test_transport_error_retries_then_raises(self, mock_get):
-        mock_get.side_effect = [httpx.TransportError("boom"), httpx.TransportError("boom"), httpx.TransportError("boom")]
+    def test_transport_error_retries_then_raises(self, mock_get, mock_sleep):
+        attempts = len(openlibrary._RETRY_DELAYS)
+        mock_get.side_effect = [httpx.TransportError("boom") for _ in range(attempts)]
 
         with pytest.raises(httpx.TransportError):
             openlibrary._get("https://example.org")
 
-        assert mock_get.call_count == 3
+        assert mock_get.call_count == attempts
 
     @patch("pyopds2_openlibrary.httpx.get")
     def test_transport_error_still_retries_until_last_attempt(self, mock_get):
@@ -766,11 +771,12 @@ class TestGetRetryLogic:
 
         mock_get.side_effect = httpx.TransportError("boom")
 
-        with patch("pyopds2_openlibrary._time.monotonic", return_value=openlibrary._LANGUAGES_MAP_TTL + 1):
+        with patch("pyopds2_openlibrary._time.monotonic", return_value=openlibrary._LANGUAGES_MAP_TTL + 1), \
+                patch("pyopds2_openlibrary._time.sleep"):
             mapping = fetch_languages_map()
 
         assert mapping is cached
-        assert mock_get.call_count == 3
+        assert mock_get.call_count == len(openlibrary._RETRY_DELAYS)
 
 
 class TestPriceParsing:

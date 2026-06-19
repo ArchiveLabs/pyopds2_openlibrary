@@ -357,10 +357,16 @@ class TestOpenLibraryDataRecord:
 
         images = record_with_cover.images()
         assert images is not None
-        assert len(images) == 1
-        # Verify cover URL structure
-        assert images[0].href.startswith("https://covers.openlibrary.org/")
-        assert "8739161" in images[0].href
+        # One cover offered in three responsive sizes (L/M/S).
+        assert len(images) == 3
+        for img in images:
+            assert img.href.startswith("https://covers.openlibrary.org/")
+            assert "8739161" in img.href
+        assert {img.href[-5:] for img in images} == {"L.jpg", "M.jpg", "S.jpg"}
+        # Legacy OPDS 1.x rels on large + thumbnail; small carries none.
+        rels = [img.rel for img in images]
+        assert "http://opds-spec.org/image" in rels
+        assert "http://opds-spec.org/image/thumbnail" in rels
 
         # Record without cover
         record_without_cover = OpenLibraryDataRecord(
