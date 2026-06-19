@@ -1293,7 +1293,7 @@ def _fake_batch_doc():
 
 
 class TestBuildHomeFeedBatch:
-    """Tests for the /search/batch.json optimisation in build_home_feed."""
+    """Tests for the /search/carousels.json optimisation in build_home_feed."""
 
     @patch("pyopds2_openlibrary.OpenLibraryDataProvider._fetch_home_groups_batch")
     @patch("pyopds2_openlibrary.OpenLibraryDataProvider._home_groups_config")

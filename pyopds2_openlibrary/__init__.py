@@ -1885,10 +1885,10 @@ class OpenLibraryDataProvider(DataProvider):
         media_type: Optional[str],
         access: Optional[str],
     ) -> Optional[list[dict]]:
-        """POST to /search/batch.json with one query per group.
+        """POST to /search/carousels.json with one query per group.
 
         Builds a list of Solr query-param dicts (one per carousel group) and
-        sends them as a single POST request to the OpenLibrary batch search
+        sends them as a single POST request to the OpenLibrary carousels search
         endpoint.  This reduces N parallel ``/search.json`` calls to a single
         round-trip.
 
@@ -1919,7 +1919,7 @@ class OpenLibraryDataProvider(DataProvider):
             for _, q, s in groups
         ]
 
-        url = f"{cls.BASE_URL}/search/batch.json"
+        url = f"{cls.BASE_URL}/search/carousels.json"
         try:
             r = httpx.post(
                 url,
