@@ -1253,3 +1253,191 @@ class TestSearchTotalsByMode:
 
         result = OpenLibraryDataProvider.search("cats", facets={"mode": "everything"})
         assert result.total == 66
+
+
+# ---------------------------------------------------------------------------
+# Tests for batch home-feed path (#100)
+# ---------------------------------------------------------------------------
+
+def _fake_batch_doc():
+    """Return a minimal but valid work doc that passes all post-filters."""
+    return {
+        "key": "/works/OL999W",
+        "title": "Batch Book",
+        "author_name": ["Test Author"],
+        "author_key": ["OL1A"],
+        "cover_i": 42,
+        "ebook_access": "borrowable",
+        "editions": {
+            "numFound": 1,
+            "docs": [
+                {
+                    "key": "/books/OL999M",
+                    "title": "Batch Book",
+                    "cover_i": 42,
+                    "ebook_access": "borrowable",
+                    "ia": ["batchbook0000auth"],
+                    "availability": {"status": "borrow_available"},
+                    "providers": [
+                        {
+                            "url": "https://archive.org/batchbook0000auth",
+                            "format": "web",
+                            "access": "borrow",
+                            "provider_name": "ia",
+                        }
+                    ],
+                }
+            ],
+        },
+    }
+
+
+class TestBuildHomeFeedBatch:
+    """Tests for the /search/batch.json optimisation in build_home_feed."""
+
+    @patch("pyopds2_openlibrary.OpenLibraryDataProvider._fetch_home_groups_batch")
+    @patch("pyopds2_openlibrary.OpenLibraryDataProvider._home_groups_config")
+    @patch("pyopds2_openlibrary.fetch_languages_map")
+    def test_build_home_feed_uses_batch_when_available(
+        self, mock_lang_map, mock_groups_config, mock_batch
+    ):
+        """build_home_feed should use batch results when _fetch_home_groups_batch succeeds."""
+        mock_lang_map.return_value = {"eng": "en"}
+
+        # One group returned by config.
+        mock_groups_config.return_value = [
+            ("Trending Books", "ebook_access:borrowable", "trending"),
+        ]
+
+        # Batch returns one result set (matching the one group).
+        doc = _fake_batch_doc()
+        mock_batch.return_value = [{"numFound": 1, "docs": [doc]}]
+
+        result = OpenLibraryDataProvider.build_home_feed("https://opds.example.org")
+
+        # _fetch_home_groups_batch must have been called exactly once.
+        mock_batch.assert_called_once()
+
+        # The result is a dict (catalog model_dump).
+        assert isinstance(result, dict)
+
+    @patch("pyopds2_openlibrary.OpenLibraryDataProvider._fetch_home_groups_batch")
+    @patch("pyopds2_openlibrary.OpenLibraryDataProvider._home_groups_config")
+    @patch("pyopds2_openlibrary.fetch_languages_map")
+    @patch("pyopds2_openlibrary.httpx.get")
+    def test_build_home_feed_falls_back_when_batch_returns_none(
+        self, mock_get, mock_lang_map, mock_groups_config, mock_batch
+    ):
+        """build_home_feed should fall back to individual requests when batch returns None."""
+        mock_lang_map.return_value = {"eng": "en"}
+
+        mock_groups_config.return_value = [
+            ("Trending Books", "ebook_access:borrowable", "trending"),
+        ]
+
+        # Batch returns None (endpoint not available).
+        mock_batch.return_value = None
+
+        # Individual search fallback response.
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"numFound": 1, "docs": [_fake_batch_doc()]}
+        mock_response.raise_for_status.return_value = None
+        mock_get.return_value = mock_response
+
+        result = OpenLibraryDataProvider.build_home_feed("https://opds.example.org")
+
+        # Batch was tried.
+        mock_batch.assert_called_once()
+        # httpx.get was called (individual fallback path executed).
+        assert mock_get.called
+        assert isinstance(result, dict)
+
+    def test_fetch_home_groups_batch_returns_none_on_404(self):
+        """_fetch_home_groups_batch should return None when the endpoint responds 404."""
+        with patch("pyopds2_openlibrary.httpx.post") as mock_post:
+            mock_response = MagicMock()
+            mock_response.status_code = 404
+            mock_post.return_value = mock_response
+
+            groups = [("Trending Books", "ebook_access:borrowable", "trending")]
+            result = OpenLibraryDataProvider._fetch_home_groups_batch(
+                groups=groups,
+                limit=25,
+                language=None,
+                mode="everything",
+                media_type=None,
+                access=None,
+            )
+
+        assert result is None
+
+    def test_fetch_home_groups_batch_returns_none_on_exception(self):
+        """_fetch_home_groups_batch should return None on any network error."""
+        import httpx as _httpx
+
+        with patch("pyopds2_openlibrary.httpx.post", side_effect=_httpx.TransportError("timeout")):
+            groups = [("Trending Books", "ebook_access:borrowable", "trending")]
+            result = OpenLibraryDataProvider._fetch_home_groups_batch(
+                groups=groups,
+                limit=25,
+                language=None,
+                mode="everything",
+                media_type=None,
+                access=None,
+            )
+
+        assert result is None
+
+    def test_fetch_home_groups_batch_returns_list_on_success(self):
+        """_fetch_home_groups_batch should return a list of result dicts on 200."""
+        fake_results = [
+            {"numFound": 5, "docs": []},
+            {"numFound": 3, "docs": []},
+        ]
+        with patch("pyopds2_openlibrary.httpx.post") as mock_post:
+            mock_response = MagicMock()
+            mock_response.status_code = 200
+            mock_response.json.return_value = fake_results
+            mock_response.raise_for_status.return_value = None
+            mock_post.return_value = mock_response
+
+            groups = [
+                ("Trending Books", "ebook_access:borrowable", "trending"),
+                ("Classic Books", "ddc:8*", "trending"),
+            ]
+            result = OpenLibraryDataProvider._fetch_home_groups_batch(
+                groups=groups,
+                limit=25,
+                language=None,
+                mode="everything",
+                media_type=None,
+                access=None,
+            )
+
+        assert result == fake_results
+
+    def test_build_search_params_builds_correct_query(self):
+        """_build_search_params should mirror search() query construction."""
+        from pyopds2_openlibrary import _build_search_params
+
+        with patch("pyopds2_openlibrary.iso_639_1_to_marc", return_value="eng"):
+            params = _build_search_params(
+                query='subject:fiction ebook_access:public',
+                sort="trending",
+                limit=25,
+                language="en",
+                mode="ebooks",
+                media_type=None,
+            )
+
+        # ebook_access:public must be stripped and replaced with mode clause.
+        assert "ebook_access:public" not in params["q"]
+        assert "ebook_access:" in params["q"]
+        # Language filter added.
+        assert "language:eng" in params["q"]
+        # lang param passed for edition preference.
+        assert params["lang"] == "en"
+        assert params["sort"] == "trending"
+        assert params["limit"] == 25
+        assert params["editions"] == "true"

@@ -1184,6 +1184,69 @@ def _build_access_links(
 
 
 # ---------------------------------------------------------------------------
+# Shared query-parameter builder (used by search() and _fetch_home_groups_batch)
+# ---------------------------------------------------------------------------
+
+def _build_search_params(
+    query: str,
+    sort: Optional[str],
+    limit: int,
+    language: Optional[str],
+    mode: str,
+    media_type: Optional[str],
+    offset: int = 0,
+) -> dict:
+    """Build the Solr query parameter dict for a single /search.json request.
+
+    Mirrors the query-construction logic in ``search()`` but returns the params
+    dict without making a network call.  Used by ``_fetch_home_groups_batch``
+    to build the batch payload without duplicating logic.
+
+    Args:
+        query: Raw Solr query string (may contain ``ebook_access:`` clauses
+            baked in by the group config — those are stripped and replaced by
+            the mode clause here, exactly as ``search()`` does).
+        sort: Solr sort expression (e.g. ``"trending"``), or ``None``.
+        limit: Maximum number of results.
+        language: BCP 47 language code (e.g. ``"en"``), or ``None``.
+        mode: Availability mode (``"everything"``, ``"ebooks"``, etc.).
+        media_type: ``"ebook"``, ``"audiobook"``, or ``None``.
+        offset: Result offset (default 0).
+    """
+    fields = [
+        "key", "title", "editions", "description", "providers", "author_name", "ia",
+        "cover_i", "availability", "ebook_access", "author_key", "subtitle", "language",
+        "number_of_pages_median", "id_librivox", "ratings_average", "ratings_count",
+        "subject",
+    ]
+
+    internal_query = query
+    # Strip any baked-in ebook_access clause, then apply the selected mode.
+    internal_query = _EBOOK_ACCESS_CLAUSE_RE.sub('', internal_query).strip()
+    internal_query = f"{internal_query} {_mode_ebook_access_clause(mode)}".strip()
+    # Apply media_type filter (audiobook/ebook) on top of the mode filter.
+    internal_query = _apply_media_type_filter(internal_query, media_type)
+    # Add language:<MARC> so non-matching works are excluded.
+    if language and 'language:' not in internal_query:
+        marc = iso_639_1_to_marc(language)
+        if marc:
+            internal_query = f"{internal_query} language:{marc}"
+
+    params: dict = {
+        "editions": "true",
+        "q": internal_query,
+        "page": (offset // limit) + 1 if limit else 1,
+        "limit": limit,
+        "fields": ",".join(fields),
+    }
+    if sort:
+        params["sort"] = sort
+    if language:
+        params["lang"] = language
+    return params
+
+
+# ---------------------------------------------------------------------------
 # Homepage carousel group helpers
 # ---------------------------------------------------------------------------
 
@@ -1813,6 +1876,72 @@ class OpenLibraryDataProvider(DataProvider):
         return f"{base}/?{urlencode(params)}" if params else f"{base}/"
 
     @classmethod
+    def _fetch_home_groups_batch(
+        cls,
+        groups: list[tuple[str, str, str]],
+        limit: int,
+        language: Optional[str],
+        mode: str,
+        media_type: Optional[str],
+        access: Optional[str],
+    ) -> Optional[list[dict]]:
+        """POST to /search/batch.json with one query per group.
+
+        Builds a list of Solr query-param dicts (one per carousel group) and
+        sends them as a single POST request to the OpenLibrary batch search
+        endpoint.  This reduces N parallel ``/search.json`` calls to a single
+        round-trip.
+
+        Returns:
+            A list of raw result dicts (one per group, in the same order as
+            *groups*) on success, or ``None`` when the endpoint returns 404
+            (not yet deployed) or any other error — so the caller can fall
+            back to the existing ThreadPoolExecutor path.
+
+        Args:
+            groups: List of ``(title, query, sort)`` tuples from
+                ``_home_groups_config``.
+            limit: Per-group result limit.
+            language: BCP 47 language code (e.g. ``"en"``), or ``None``.
+            mode: Availability mode (``"everything"``, ``"ebooks"``, etc.).
+            media_type: ``"ebook"``, ``"audiobook"``, or ``None``.
+            access: ``"print_disabled"`` or ``None``/``"general"``.
+        """
+        queries = [
+            _build_search_params(
+                query=q,
+                sort=s,
+                limit=limit,
+                language=language,
+                mode=mode,
+                media_type=media_type,
+            )
+            for _, q, s in groups
+        ]
+
+        url = f"{cls.BASE_URL}/search/batch.json"
+        try:
+            r = httpx.post(
+                url,
+                json={"queries": queries},
+                timeout=_REQUEST_TIMEOUT,
+                headers={"User-Agent": _user_agent()},
+            )
+            if r.status_code == 404:
+                return None
+            r.raise_for_status()
+            data = r.json()
+            # Expect a list of result dicts, one per query.
+            if isinstance(data, list):
+                return data
+            # Some implementations may wrap the list.
+            if isinstance(data, dict) and "results" in data:
+                return data["results"]
+            return None
+        except Exception:
+            return None
+
+    @classmethod
     def build_home_feed(
         cls,
         base: str,
@@ -1888,21 +2017,114 @@ class OpenLibraryDataProvider(DataProvider):
             except Exception:
                 return None
 
+        def _process_batch_result(
+            raw: dict,
+            title: str,
+            query: str,
+        ) -> Optional[Catalog]:
+            """Convert a single batch result dict into a Catalog, applying all post-filters."""
+            try:
+                docs = raw.get("docs", [])
+                records = []
+                for doc in docs:
+                    if "editions" in doc and isinstance(doc["editions"], dict):
+                        doc = dict(doc)
+                        doc["editions"] = OpenLibraryDataRecord.EditionsResultSet.model_validate(doc["editions"])
+                    records.append(OpenLibraryDataRecord.model_validate(doc))
+
+                # Language edition alignment (same as search()).
+                if language:
+                    records = _align_editions_to_language(records, language, resolve_mismatched=False)
+
+                # Acquisition / cover filters (same as search()).
+                if group_require_cover:
+                    records = [r for r in records if _has_acquisition_options(r) and _has_cover(r)]
+                else:
+                    records = [r for r in records if _has_acquisition_options(r)]
+
+                # Media type ebook filter — exclude LibriVox audiobooks.
+                if media_type == "ebook":
+                    records = [r for r in records if not r.id_librivox]
+
+                # Access filter.
+                if access == "print_disabled":
+                    records = [r for r in records
+                               if _get_edition_ebook_access(r) == "printdisabled"
+                               or r.ebook_access == "printdisabled"]
+                else:
+                    records = [r for r in records
+                               if _get_edition_ebook_access(r) != "printdisabled"
+                               and r.ebook_access != "printdisabled"]
+
+                # Availability sort (same as search()).
+                if access != "print_disabled" and mode in ('ebooks', 'print_disabled', 'open_access', 'buyable'):
+                    if mode == 'buyable':
+                        records = [r for r in records if _has_buyable_provider(r)]
+                    records.sort(key=lambda r: (0 if _is_currently_available(r) else 1))
+                elif access == "print_disabled":
+                    records.sort(key=lambda r: (0 if _is_currently_available(r) else 1))
+
+                # Strict ebook_access post-filter.
+                if access != "print_disabled" and mode in _EBOOK_MODE_ALLOWED:
+                    allowed = _EBOOK_MODE_ALLOWED[mode]
+                    if mode == "open_access":
+                        records = [r for r in records if _get_edition_ebook_access(r) in allowed or r.ebook_access in allowed]
+                    else:
+                        records = [r for r in records if _get_edition_ebook_access(r) in allowed]
+
+                total = raw.get("numFound", len(records))
+                if mode == 'buyable':
+                    total = len(records)
+
+                response_kwargs = {
+                    "provider": OpenLibraryDataProvider,
+                    "records": records,
+                    "total": total,
+                    "query": query,
+                    "limit": group_limit,
+                    "offset": 0,
+                    "sort": None,
+                }
+                resp = DataProvider.SearchResponse(**response_kwargs)
+                desc = _GROUP_DESCRIPTIONS.get(title)
+                return Catalog.create(metadata=Metadata(title=title, description=desc), response=resp)
+            except Exception:
+                return None
+
         non_empty: list[Catalog] = []
         if all_groups:
-            with ThreadPoolExecutor(max_workers=len(all_groups)) as pool:
-                futures = {
-                    pool.submit(fetch_one, t, q, s): i
-                    for i, (t, q, s) in enumerate(all_groups)
-                }
-                results: list[Optional[Catalog]] = [None] * len(all_groups)
-                for future in as_completed(futures):
-                    results[futures[future]] = future.result()
+            # Try the batch endpoint first (1 round-trip instead of N parallel requests).
+            batch_results = cls._fetch_home_groups_batch(
+                groups=all_groups,
+                limit=group_limit,
+                language=language,
+                mode=mode,
+                media_type=media_type,
+                access=access,
+            )
+            if batch_results is not None and len(batch_results) == len(all_groups):
+                # Batch succeeded — process each result inline.
+                results_batch: list[Optional[Catalog]] = [
+                    _process_batch_result(raw, title, query)
+                    for (title, query, _sort), raw in zip(all_groups, batch_results)
+                ]
+                non_empty = [g for g in results_batch if g is not None and g.publications]
+            else:
+                # Batch endpoint unavailable or returned unexpected data —
+                # fall back to the original parallel individual-request path.
+                with ThreadPoolExecutor(max_workers=len(all_groups)) as pool:
+                    futures = {
+                        pool.submit(fetch_one, t, q, s): i
+                        for i, (t, q, s) in enumerate(all_groups)
+                    }
+                    results: list[Optional[Catalog]] = [None] * len(all_groups)
+                    for future in as_completed(futures):
+                        results[futures[future]] = future.result()
 
-            non_empty = [
-                g for g in results
-                if g is not None and g.publications
-            ]
+                non_empty = [
+                    g for g in results
+                    if g is not None and g.publications
+                ]
 
         # Paginate the surviving (non-empty) groups.
         start = (page - 1) * per_page
