@@ -1322,8 +1322,12 @@ class OpenLibraryDataProvider(DataProvider):
     ) -> dict[str, Optional[int]]:
         """Fetch ``numberOfItems`` counts for every availability mode.
 
-        If *known_mode* and *known_total* are provided the count request for
-        that mode is skipped (we already have it from the main search).
+        If *known_mode* is provided the count request for that mode is skipped
+        entirely — the caller already has it from the main search ``numFound``
+        and will overwrite the placeholder after this call returns.  Supply
+        *known_total* as well when you want the dict value pre-filled (e.g.
+        when running sequentially); omit it when running in parallel with the
+        main search and you'll overwrite it yourself afterward.
 
         Modes that cannot be counted server-side (e.g. ``buyable``) will have
         a ``None`` value unless supplied via *known_mode*/*known_total*.
@@ -1339,7 +1343,8 @@ class OpenLibraryDataProvider(DataProvider):
         counts: dict[str, Optional[int]] = {}
         to_fetch: list[str] = []
         for m in modes:
-            if known_mode and m == known_mode and known_total is not None:
+            if known_mode and m == known_mode:
+                # Skip the Solr round-trip; caller will overwrite with numFound.
                 counts[m] = known_total
             elif m == "buyable":
                 counts[m] = None
