@@ -1,5 +1,6 @@
 """Tests for OpenLibrary OPDS Catalog creation."""
 
+import httpx
 import pytest
 from urllib.parse import parse_qs, urlparse
 from unittest.mock import patch, MagicMock
@@ -1117,8 +1118,8 @@ class TestRequestTimeoutUsage:
 
         fetch_languages_map()
 
-        assert mock_client.get.call_args[1]["timeout"] == 30.0
-        assert mock_client.get.call_args[1]["timeout"] == _REQUEST_TIMEOUT
+        expected = httpx.Timeout(connect=5.0, read=_REQUEST_TIMEOUT, write=5.0, pool=2.0)
+        assert mock_client.get.call_args[1]["timeout"] == expected
 
     @patch("pyopds2_openlibrary._get_http_client")
     def test_resolve_preferred_edition_editions_request_passes_timeout(self, mock_get_client):
@@ -1156,8 +1157,8 @@ class TestRequestTimeoutUsage:
 
         _resolve_preferred_edition("/works/OL40W", "eng", ["key", "title", "providers"])
 
-        assert mock_client.get.call_args_list[0].kwargs["timeout"] == 30.0
-        assert mock_client.get.call_args_list[0].kwargs["timeout"] == _REQUEST_TIMEOUT
+        expected = httpx.Timeout(connect=5.0, read=_REQUEST_TIMEOUT, write=5.0, pool=2.0)
+        assert mock_client.get.call_args_list[0].kwargs["timeout"] == expected
 
     @patch("pyopds2_openlibrary._get_http_client")
     def test_resolve_preferred_edition_search_request_passes_timeout(self, mock_get_client):
@@ -1195,8 +1196,8 @@ class TestRequestTimeoutUsage:
 
         _resolve_preferred_edition("/works/OL41W", "eng", ["key", "title", "providers"])
 
-        assert mock_client.get.call_args_list[1].kwargs["timeout"] == 30.0
-        assert mock_client.get.call_args_list[1].kwargs["timeout"] == _REQUEST_TIMEOUT
+        expected = httpx.Timeout(connect=5.0, read=_REQUEST_TIMEOUT, write=5.0, pool=2.0)
+        assert mock_client.get.call_args_list[1].kwargs["timeout"] == expected
 
     @patch("pyopds2_openlibrary._get_http_client")
     def test_count_for_mode_passes_timeout(self, mock_get_client):
@@ -1209,8 +1210,8 @@ class TestRequestTimeoutUsage:
 
         OpenLibraryDataProvider._count_for_mode("cats", "everything")
 
-        assert mock_client.get.call_args[1]["timeout"] == 30.0
-        assert mock_client.get.call_args[1]["timeout"] == _REQUEST_TIMEOUT
+        expected = httpx.Timeout(connect=5.0, read=_REQUEST_TIMEOUT, write=5.0, pool=2.0)
+        assert mock_client.get.call_args[1]["timeout"] == expected
 
     @patch("pyopds2_openlibrary._get_http_client")
     def test_search_passes_timeout(self, mock_get_client):
@@ -1242,8 +1243,8 @@ class TestRequestTimeoutUsage:
 
         OpenLibraryDataProvider.search("cats", facets={"mode": "everything"})
 
-        assert mock_client.get.call_args[1]["timeout"] == 30.0
-        assert mock_client.get.call_args[1]["timeout"] == _REQUEST_TIMEOUT
+        expected = httpx.Timeout(connect=5.0, read=_REQUEST_TIMEOUT, write=5.0, pool=2.0)
+        assert mock_client.get.call_args[1]["timeout"] == expected
 
 
 class TestSearchTotalsByMode:
