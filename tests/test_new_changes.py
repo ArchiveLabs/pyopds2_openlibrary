@@ -4,18 +4,20 @@ import pyopds2_openlibrary as openlibrary
 from pyopds2_openlibrary import OpenLibraryDataProvider
 
 
-@patch("pyopds2_openlibrary.httpx.get")
-def test_count_for_mode_print_disabled_appends_filter(mock_get):
+@patch("pyopds2_openlibrary._get_http_client")
+def test_count_for_mode_print_disabled_appends_filter(mock_get_client):
+    mock_client = MagicMock()
+    mock_get_client.return_value = mock_client
     resp = MagicMock()
     resp.raise_for_status.return_value = None
     resp.json.return_value = {"numFound": 7}
-    mock_get.return_value = resp
+    mock_client.get.return_value = resp
 
     # Call internal helper for print_disabled mode
     total = OpenLibraryDataProvider._count_for_mode("cats", "print_disabled")
 
     # Verify HTTP call used the printdisabled ebook_access filter
-    called_params = mock_get.call_args.kwargs["params"]
+    called_params = mock_client.get.call_args.kwargs["params"]
     assert "q" in called_params
     assert "ebook_access:printdisabled" in called_params["q"]
     assert called_params["limit"] == 0
