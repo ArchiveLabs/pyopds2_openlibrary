@@ -79,11 +79,14 @@ _REQUEST_TIMEOUT: float = 30.0
 
 # HTTP status codes that indicate a transient server-side failure worth retrying.
 _RETRY_STATUS_CODES: frozenset[int] = frozenset({429, 500, 502, 503, 504})
-# Default delays between attempts (seconds): 3 total attempts — immediate, +1 s, +2 s.
-# A 429 Retry-After header overrides the per-attempt delay when present.
-_RETRY_DELAYS: tuple[float, ...] = (0.0, 1.0, 2.0)
-# Cap on Retry-After to avoid holding a thread-pool thread for too long.
-_RETRY_AFTER_MAX: float = 10.0
+# Default delays between attempts (seconds): 3 total attempts — immediate, +0.25 s,
+# +0.5 s. These requests are on the critical path of user-facing pages, so the
+# total backoff budget is kept under ~1 s — a transient blip should cost a beat,
+# not seconds. A 429 Retry-After header overrides the per-attempt delay when
+# present (capped below to stay within the same budget).
+_RETRY_DELAYS: tuple[float, ...] = (0.0, 0.25, 0.5)
+# Cap on Retry-After so a server asking us to wait can't blow the ~1 s budget.
+_RETRY_AFTER_MAX: float = 0.5
 # Default User-Agent. OpenLibrary's edge blocks the default httpx UA with 403,
 # so every outbound request must identify itself. Consumers should override
 # via ``OpenLibraryDataProvider.USER_AGENT`` to include contact info.

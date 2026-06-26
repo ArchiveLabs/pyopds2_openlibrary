@@ -661,7 +661,8 @@ class TestGetRetryLogic:
         result = openlibrary._get("https://example.org")
 
         assert result.status_code == 200
-        mock_sleep.assert_any_call(10.0)
+        # A large Retry-After must be clamped to the cap, not honored literally.
+        mock_sleep.assert_any_call(openlibrary._RETRY_AFTER_MAX)
 
     @patch("pyopds2_openlibrary._get_http_client")
     def test_persistent_5xx_raises_after_retries_exhausted(self, mock_get_client):
