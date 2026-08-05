@@ -758,11 +758,13 @@ def _has_acquisition_options(record: OpenLibraryDataRecord) -> bool:
 
     Mirrors the filtering logic in ``ol_acquisition_to_opds_links`` so that
     books with no actionable link are hidden from results.
+
+    A work-level ``id_librivox`` is deliberately *not* enough on its own: the
+    LibriVox fallback in ``links()`` is a plain ``rel=alternate`` catalog page,
+    which no OPDS client can acquire or open.  Such an entry must come from the
+    edition's own providers (IA webpub, epub/pdf download, or a purchase link)
+    to be servable.
     """
-    # Works with a LibriVox recording always have audio content, even when the
-    # edition returned by OL's search API is a print/ebook edition with no providers.
-    if record.id_librivox:
-        return True
     edition = record.editions.docs[0] if record.editions and record.editions.docs else None
     if not edition or not edition.providers:
         return False

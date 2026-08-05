@@ -575,6 +575,52 @@ class TestHasAcquisitionOptions:
         record = OpenLibraryDataRecord(key="/works/OL12W", title="No editions")
         assert _has_acquisition_options(record) is False
 
+    def test_returns_false_for_librivox_only_audio_provider(self):
+        """OL58393454M: the only provider is a LibriVox ``audio`` entry, which
+        yields no acquisition link — just a ``rel=alternate`` catalog page."""
+        record = _record_with_providers(
+            OpenLibraryDataRecord.EditionProvider(
+                provider_name="librivox",
+                format="audio",
+                access="open-access",
+                url="https://librivox.org/21236",
+            ),
+        )
+        record.id_librivox = ["21236"]
+        assert _has_acquisition_options(record) is False
+
+    def test_returns_false_for_librivox_work_whose_edition_has_no_providers(self):
+        record = OpenLibraryDataRecord(
+            key="/works/OL13W",
+            title="Print edition of a LibriVox work",
+            id_librivox=["12345"],
+            editions=OpenLibraryDataRecord.EditionsResultSet(
+                docs=[OpenLibraryDataRecord.EditionDoc(key="/books/OL13M", title="Edition")]
+            ),
+        )
+        assert _has_acquisition_options(record) is False
+
+    def test_returns_true_for_librivox_work_with_ia_provider(self):
+        """The common LibriVox case: the edition is on IA, so it still gets a
+        webpub link and must stay visible."""
+        edition = OpenLibraryDataRecord.EditionDoc(
+            key="/books/OL14M",
+            title="Edition",
+            ia=["aroomofonesown_1906_librivox"],
+            providers=[
+                OpenLibraryDataRecord.EditionProvider(
+                    provider_name="ia", format="audio", url="https://archive.org/details/x"
+                ),
+            ],
+        )
+        record = OpenLibraryDataRecord(
+            key="/works/OL14W",
+            title="Work",
+            id_librivox=["21236"],
+            editions=OpenLibraryDataRecord.EditionsResultSet(docs=[edition]),
+        )
+        assert _has_acquisition_options(record) is True
+
 
 class TestAcquisitionLinkRelFallback:
     def test_access_none_uses_generic_acquisition_rel(self):
