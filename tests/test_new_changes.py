@@ -38,3 +38,24 @@ def test_fetch_facet_counts_includes_print_disabled(mock_count):
     assert set(counts.keys()) == {"everything", "ebooks", "print_disabled", "open_access", "buyable"}
     assert counts["print_disabled"] == 35
     assert counts["buyable"] is None
+
+
+@patch("pyopds2_openlibrary._get_http_client")
+def test_search_requests_cover_dimensions(mock_get_client):
+    """search() must ask Solr for cover_width/cover_height (they are not in
+    OL's default field set) so images() can size the -L rendition."""
+    mock_client = MagicMock()
+    mock_get_client.return_value = mock_client
+    resp = MagicMock()
+    resp.raise_for_status.return_value = None
+    resp.json.return_value = {"numFound": 0, "docs": []}
+    mock_client.get.return_value = resp
+
+    OpenLibraryDataProvider.search("cats")
+
+    fields = mock_client.get.call_args.kwargs["params"]["fields"].split(",")
+    assert {"cover_i", "cover_width", "cover_height"} <= set(fields)
+
+
+def test_edition_resolve_fields_include_cover_dimensions():
+    assert {"cover_i", "cover_width", "cover_height"} <= set(openlibrary._EDITION_RESOLVE_FIELDS)

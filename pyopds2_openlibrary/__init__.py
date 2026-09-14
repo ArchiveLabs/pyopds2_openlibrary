@@ -173,6 +173,31 @@ def _get(url: str, *, params=None, timeout: float = _REQUEST_TIMEOUT) -> httpx.R
 
 
 
+# Bounding box the covers server scales its ``-L`` rendition into. Mirrors
+# ``image_sizes["L"]`` in openlibrary/coverstore/config.py.
+_COVER_L_BOX = (500, 500)
+
+
+def _fit_cover_size(
+    width: Optional[int],
+    height: Optional[int],
+    box: tuple[int, int] = _COVER_L_BOX,
+) -> Optional[tuple[int, int]]:
+    """Pixel size the covers server serves for an original of *width* x
+    *height* scaled into *box*, or ``None`` when the original size is unknown.
+    """
+    if not width or not height or width < 0 or height < 0:
+        return None
+    x, y = width, height
+    if x > box[0]:
+        y = max(y * box[0] // x, 1)
+        x = box[0]
+    if y > box[1]:
+        x = max(x * box[1] // y, 1)
+        y = box[1]
+    return x, y
+
+
 class BookSharedDoc(BaseModel):
     """Fields shared between OpenLibrary works and editions."""
     key: Optional[str] = None
@@ -180,6 +205,11 @@ class BookSharedDoc(BaseModel):
     subtitle: Optional[str] = None
     description: Optional[str] = None
     cover_i: Optional[int] = None
+    # Pixel size of the *original* upload behind ``cover_i``. The served
+    # ``-L`` rendition is smaller; ``images()`` derives its size via
+    # ``_fit_cover_size``.
+    cover_width: Optional[int] = None
+    cover_height: Optional[int] = None
     ebook_access: Optional[str] = None
     language: Optional[list[str]] = None
     ia: Optional[list[str]] = None
@@ -307,11 +337,20 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
     def images(self) -> Optional[List[Link]]:
         edition = self.editions.docs[0] if self.editions and self.editions.docs else None
         book = edition or self
-        if book.cover_i:
-            return [
-                Link(href=f"https://covers.openlibrary.org/b/id/{book.cover_i}-L.jpg", type="image/jpeg", rel="cover"),
-            ]
-        return None
+        if not book.cover_i:
+            return None
+        # OPDS 2.0 §2.3: ``width``/``height`` describe the linked resource, so
+        # report the size of the ``-L`` rendition, not the Solr original.
+        size = _fit_cover_size(book.cover_width, book.cover_height)
+        dimensions = {"width": size[0], "height": size[1]} if size else {}
+        return [
+            Link(
+                href=f"https://covers.openlibrary.org/b/id/{book.cover_i}-L.jpg",
+                type="image/jpeg",
+                rel="cover",
+                **dimensions,
+            ),
+        ]
 
     def metadata(self) -> Metadata:
         """Return this record as OPDS Metadata."""
@@ -994,7 +1033,7 @@ def _resolve_preferred_edition(
 
 
 _EDITION_RESOLVE_FIELDS = [
-    "key", "title", "subtitle", "description", "cover_i",
+    "key", "title", "subtitle", "description", "cover_i", "cover_width", "cover_height",
     "ebook_access", "language", "ia", "availability", "providers",
 ]
 
@@ -2045,9 +2084,9 @@ class OpenLibraryDataProvider(DataProvider):
         """
         fields = [
             "key", "title", "editions", "description", "providers", "author_name", "ia",
-            "cover_i", "availability", "ebook_access", "author_key", "subtitle", "language",
-            "number_of_pages_median", "id_librivox", "ratings_average", "ratings_count",
-            "subject",
+            "cover_i", "cover_width", "cover_height", "availability", "ebook_access",
+            "author_key", "subtitle", "language", "number_of_pages_median", "id_librivox",
+            "ratings_average", "ratings_count", "subject",
         ]
 
         internal_query = query
