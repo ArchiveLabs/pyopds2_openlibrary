@@ -512,6 +512,85 @@ class TestImages:
         ).images()
         assert links[0].href.endswith("/222-L.jpg")
 
+    def test_dimensions_are_those_of_the_large_rendition(self):
+        # Solr reports the 443x685 original; covers.openlibrary.org serves
+        # the -L rendition scaled to fit 500x500, i.e. 323x500.
+        link = _record(
+            key="/works/OL1W", title="Book", cover_i=10580435, cover_width=443, cover_height=685,
+        ).images()[0]
+        assert (link.width, link.height) == (323, 500)
+        dumped = link.model_dump(exclude_none=True)
+        assert dumped["width"] == 323 and dumped["height"] == 500
+
+    def test_dimensions_reach_the_serialized_publication(self):
+        pub = _record(
+            key="/works/OL1W", title="Book", cover_i=1, cover_width=2676, cover_height=4358,
+        ).to_publication().model_dump(exclude_none=True)
+        assert pub["images"][0]["width"] == 307
+        assert pub["images"][0]["height"] == 500
+
+    def test_small_original_is_not_upscaled(self):
+        link = _record(key="/works/OL1W", title="Book", cover_i=1, cover_width=300, cover_height=450).images()[0]
+        assert (link.width, link.height) == (300, 450)
+
+    def test_landscape_original_is_bounded_by_width(self):
+        link = _record(key="/works/OL1W", title="Book", cover_i=1, cover_width=1000, cover_height=400).images()[0]
+        assert (link.width, link.height) == (500, 200)
+
+    @pytest.mark.parametrize(
+        "dims",
+        [
+            {},
+            {"cover_width": 443},
+            {"cover_height": 685},
+            {"cover_width": 0, "cover_height": 685},
+            {"cover_width": -1, "cover_height": 685},
+        ],
+    )
+    def test_unknown_dimensions_are_omitted(self, dims):
+        link = _record(key="/works/OL1W", title="Book", cover_i=1, **dims).images()[0]
+        dumped = link.model_dump(exclude_none=True)
+        assert "width" not in dumped and "height" not in dumped
+
+    def test_edition_dimensions_used_with_edition_cover(self):
+        link = _record(
+            key="/works/OL1W",
+            title="Book",
+            cover_i=111,
+            cover_width=443,
+            cover_height=685,
+            editions={"docs": [{
+                "key": "/books/OL1M", "title": "Edition",
+                "cover_i": 222, "cover_width": 1033, "cover_height": 1500,
+            }]},
+        ).images()[0]
+        assert link.href.endswith("/222-L.jpg")
+        assert (link.width, link.height) == (344, 500)
+
+
+class TestFitCoverSize:
+    """Mirror of coverlib.resize_image, checked against sizes actually served."""
+
+    @pytest.mark.parametrize(
+        "original, box, expected",
+        [
+            ((443, 685), (500, 500), (323, 500)),
+            ((434, 685), (500, 500), (316, 500)),
+            ((443, 685), (180, 360), (180, 278)),
+            ((434, 685), (180, 360), (180, 284)),
+            ((434, 685), (116, 58), (36, 58)),
+            ((500, 500), (500, 500), (500, 500)),
+            ((1, 100000), (500, 500), (1, 500)),
+        ],
+    )
+    def test_matches_covers_server(self, original, box, expected):
+        assert openlibrary._fit_cover_size(*original, box) == expected
+
+    def test_unknown_returns_none(self):
+        assert openlibrary._fit_cover_size(None, 685) is None
+        assert openlibrary._fit_cover_size(443, None) is None
+        assert openlibrary._fit_cover_size(0, 0) is None
+
 
 class TestMetadata:
     def test_title_prefers_edition(self):
