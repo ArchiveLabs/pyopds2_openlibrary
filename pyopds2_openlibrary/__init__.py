@@ -792,6 +792,60 @@ def iso_639_1_to_marc(iso_code: str) -> Optional[str]:
     return _iso_to_marc_cache.get(iso_code)
 
 
+def parse_languages(raw: Optional[str]) -> list[str]:
+    """Split a ``language`` parameter into its codes.
+
+    ``language`` is a comma-separated list of ISO 639-1 codes, the reader's
+    primary language first: ``"en,fr"``.  Codes are lowercased and stripped,
+    empties dropped, duplicates removed with the first occurrence kept, so
+    ``" EN, fr,,en"`` reads as ``["en", "fr"]``.
+    """
+    if not raw:
+        return []
+    seen: list[str] = []
+    for part in raw.split(","):
+        code = part.strip().lower()
+        if code and code not in seen:
+            seen.append(code)
+    return seen
+
+
+def canonical_language(raw: Optional[str]) -> Optional[str]:
+    """The one spelling of a ``language`` parameter: ``"en,fr"`` or ``None``.
+
+    Idempotent.  Every entry point canonicalises first, so the hrefs a feed
+    emits and the keys a cache is filed under are the same for ``"EN, fr"``
+    and ``"en,fr"``.
+    """
+    codes = parse_languages(raw)
+    return ",".join(codes) if codes else None
+
+
+def _language_solr_clause(raw: Optional[str]) -> Optional[str]:
+    """The Solr clause that keeps works in any of the given languages.
+
+    Each ISO code is mapped to its MARC code; one that maps to nothing is
+    ignored.  None mapped is no clause; one is ``language:eng``; several are
+    ``language:(eng OR fre)``.
+    """
+    marcs: list[str] = []
+    for code in parse_languages(raw):
+        marc = iso_639_1_to_marc(code)
+        if marc and marc not in marcs:
+            marcs.append(marc)
+    if not marcs:
+        return None
+    if len(marcs) == 1:
+        return f"language:{marcs[0]}"
+    return f"language:({' OR '.join(marcs)})"
+
+
+def _is_english_or_all(language: Optional[str]) -> bool:
+    """Whether the front page keeps its English rules for this selection."""
+    languages = parse_languages(language)
+    return not languages or "en" in languages
+
+
 def _has_acquisition_options(record: OpenLibraryDataRecord) -> bool:
     """Check if a record's edition would produce at least one usable OPDS link.
 
@@ -1163,9 +1217,15 @@ def _build_language_links(
     as required by the OPDS 2.0 specification.  ``language=None`` means
     "All Languages" (no filter); that entry is always first in the list.
 
+    The links stay single-select, as OPDS facets are: each narrows to one
+    language and "All" clears.  A selection of several languages (``"en,fr"``)
+    marks no entry active — it is not any one of them — but keeps every
+    selected language listed whatever its count.
+
     Args:
-        language: Active BCP 47 language code (e.g. ``"en"``), or ``None``
-            for the "All Languages" (unfiltered) selection.
+        language: Active ISO 639-1 code (e.g. ``"en"``), a comma-separated
+            list of them, or ``None`` for the "All Languages" (unfiltered)
+            selection.
         href_fn: Converts a language code (or ``None``) to a full URL.
         counts: Optional ``{iso_639_1: numFound}`` map. When supplied, only
             languages with ``count > 0`` are emitted (the active language is
@@ -1174,9 +1234,10 @@ def _build_language_links(
             the full language list is emitted unfiltered — used as the
             fallback path when the count request fails.
     """
+    selected = parse_languages(language)
     links = []
     for lang_code, label in fetch_language_options():
-        if counts is not None and lang_code is not None and lang_code != language:
+        if counts is not None and lang_code is not None and lang_code not in selected:
             if counts.get(lang_code, 0) <= 0:
                 continue
         link: dict = {
@@ -1188,7 +1249,8 @@ def _build_language_links(
             n = counts.get(lang_code)
             if n is not None and n > 0:
                 link.setdefault("properties", {})["numberOfItems"] = n
-        if lang_code == language:
+        is_active = (lang_code is None and not selected) or (lang_code is not None and selected == [lang_code])
+        if is_active:
             link["rel"] = "self"
             link.setdefault("properties", {})["active"] = True
         links.append(link)
@@ -1378,11 +1440,11 @@ class OpenLibraryDataProvider(DataProvider):
         internal_query = _EBOOK_ACCESS_CLAUSE_RE.sub('', query).strip()
         internal_query = f"{internal_query} {_mode_ebook_access_clause(mode)}".strip()
 
-        # Scope the count to the active language, matching search().
+        # Scope the count to the active languages, matching search().
         if language and 'language:' not in internal_query:
-            marc = iso_639_1_to_marc(language)
-            if marc:
-                internal_query = f"{internal_query} language:{marc}"
+            clause = _language_solr_clause(language)
+            if clause:
+                internal_query = f"{internal_query} {clause}"
 
         r = _get(
             f"{OpenLibraryDataProvider.BASE_URL}/search.json",
@@ -1514,17 +1576,19 @@ class OpenLibraryDataProvider(DataProvider):
         To re-enable sort: add the Sort group dict to the returned list.
 
         Args:
-            language: BCP 47 language code for the active selection (e.g.
-                ``"en"``), or ``None`` for "All Languages" (no filter).
-                This value is preserved in every facet href so that switching
-                availability mode keeps the current language selection, and
-                vice-versa.
+            language: Comma-separated ISO 639-1 codes for the active selection
+                (e.g. ``"en"`` or ``"en,fr"``), or ``None`` for "All
+                Languages" (no filter). This value is preserved in every facet
+                href so that switching availability mode keeps the current
+                language selection, and vice-versa.
             title: Display title for the search results page (e.g. ``"Art"``).
                 Preserved in every facet href so switching facets keeps the
                 page title instead of falling back to "Search Results".
             total: Reserved for Sort links when re-enabled.
             availability_counts: ``{mode_value: item_count}`` per OPDS 2.0 §2.4.
         """
+        language = canonical_language(language)
+
         def search_href(
             sort_val: Optional[str] = sort,
             mode_val: str = mode,
@@ -1608,11 +1672,13 @@ class OpenLibraryDataProvider(DataProvider):
         Args:
             base_url: Base URL of the OPDS service (no trailing slash).
             mode: Currently active availability mode.
-            language: Active BCP 47 language code (e.g. ``"en"``), or ``None``
-                for "All Languages" (no filter).
+            language: Comma-separated ISO 639-1 codes (e.g. ``"en"`` or
+                ``"en,fr"``), or ``None`` for "All Languages" (no filter).
             media_type: Active media type (e.g. ``"ebook"`` or ``"audiobook"``),
                 or ``None`` for all media types.
         """
+        language = canonical_language(language)
+
         def home_href(val: str) -> str:
             params: dict[str, str] = {}
             if val != "everything":
@@ -1711,6 +1777,8 @@ class OpenLibraryDataProvider(DataProvider):
         the current page, limit, language, and media_type selections when switching
         between facets.
         """
+        language = canonical_language(language)
+
         def author_href(
             mode_val: str = mode,
             lang_val: Optional[str] = language,
@@ -1807,8 +1875,11 @@ class OpenLibraryDataProvider(DataProvider):
           filters are dropped for non-English languages because OL's trending
           and reading-log signals are heavily English-biased; keeping them
           would cause most genre groups to return 0 results.
+        - A list of languages counts as English when English is in it: with
+          ``en`` in the OR clause the English corpus fills every group, and
+          without it the pool is still a minority-language one.
         """
-        is_english_or_all = language in (None, "en")
+        is_english_or_all = _is_english_or_all(language)
         include_standard_ebooks = is_english_or_all
         # Non-English: drop trending_score / readinglog gates so groups have content.
         require_trending = is_english_or_all
@@ -1913,7 +1984,8 @@ class OpenLibraryDataProvider(DataProvider):
             base: OPDS base URL (no trailing slash).
             mode: Availability filter (``everything``, ``ebooks``,
                 ``open_access``, ``buyable``).
-            language: BCP 47 language code or ``None`` for all.
+            language: Comma-separated ISO 639-1 codes, the preferred one
+                first, or ``None`` for all.
             page: 1-based page number for group pagination.
             featured_subjects: Override the default ``FEATURED_SUBJECTS``
                 list.  Each entry needs ``presentable_name`` and either
@@ -1926,6 +1998,7 @@ class OpenLibraryDataProvider(DataProvider):
         """
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
+        language = canonical_language(language)
         subjects = featured_subjects if featured_subjects is not None else cls.FEATURED_SUBJECTS
         media = cls.OPDS_MEDIA_TYPE
         search_url = cls.SEARCH_URL
@@ -1946,7 +2019,7 @@ class OpenLibraryDataProvider(DataProvider):
         # otherwise empty most subject groups. Empty carousels are dropped
         # entirely by the publications-check below, so a placeholder cover
         # is a better UX than a missing carousel.
-        is_english_or_all = language in (None, "en")
+        is_english_or_all = _is_english_or_all(language)
         # Caller-provided limit (> 0) overrides the language-default cap; lets
         # a client tune per-carousel size via ``?limit=N`` on the home route.
         default_limit = 25 if is_english_or_all else 50
@@ -1993,7 +2066,7 @@ class OpenLibraryDataProvider(DataProvider):
             # Standard Ebooks is English-only; hide its nav link for other languages.
             visible_subjects = [
                 s for s in subjects
-                if s.get("presentable_name") != "Standard Ebooks" or language in (None, "en")
+                if s.get("presentable_name") != "Standard Ebooks" or _is_english_or_all(language)
             ]
             for subject in visible_subjects:
                 q = subject.get("query") or (
@@ -2020,7 +2093,7 @@ class OpenLibraryDataProvider(DataProvider):
         links = [
             Link(rel="self", href=cls._home_page_href(base, mode, language, page, media_type, access), type=media),
             Link(rel="start", href=f"{base}/", type=media),
-            Link(rel="search", href=f"{base}/search{{?query}}", type=media, templated=True),
+            Link(rel="search", href=f"{base}/search{{?query,language}}", type=media, templated=True),
             cls.bookshelf_link(),
             cls.profile_link(),
         ]
@@ -2075,13 +2148,18 @@ class OpenLibraryDataProvider(DataProvider):
                       (``ebook_access:[printdisabled TO *]``), then hide
                       records without acquisition options and keep only
                       those that have at least one non-free provider.
-            language: BCP 47 language code to prefer (e.g. ``"en"`` for
-                English), or ``None`` to return results in all languages
-                without any language filter.  When set, OL is asked to
-                surface editions in that language and, for
-                ``edition_key:`` queries, the preferred edition is
-                resolved via the work's editions endpoint.
+            language: Comma-separated ISO 639-1 codes, the preferred one
+                first (e.g. ``"en"`` or ``"en,fr"``), or ``None`` to return
+                results in all languages without any language filter.  When
+                set, works in any of the languages are kept, OL is asked to
+                surface editions in the first and, for ``edition_key:``
+                queries, the preferred edition is resolved via the work's
+                editions endpoint.
         """
+        language = canonical_language(language)
+        languages = parse_languages(language)
+        primary_language = languages[0] if languages else None
+
         fields = [
             "key", "title", "editions", "description", "providers", "author_name", "ia",
             "cover_i", "cover_width", "cover_height", "availability", "ebook_access",
@@ -2111,13 +2189,14 @@ class OpenLibraryDataProvider(DataProvider):
         # Apply media_type filter (audiobook/ebook) on top of the mode filter.
         internal_query = _apply_media_type_filter(internal_query, media_type)
 
-        # When a language filter is active, add language:<MARC> to the Solr
-        # query so non-matching works are excluded (the `lang` param only
-        # influences edition preference / ranking, it does not filter).
+        # When a language filter is active, add language:<MARC> (or an OR of
+        # them) to the Solr query so non-matching works are excluded (the
+        # `lang` param only influences edition preference / ranking, it does
+        # not filter).
         if language and 'language:' not in internal_query:
-            marc = iso_639_1_to_marc(language)
-            if marc:
-                internal_query = f"{internal_query} language:{marc}"
+            clause = _language_solr_clause(language)
+            if clause:
+                internal_query = f"{internal_query} {clause}"
 
         params = {
             "editions": "true",
@@ -2126,8 +2205,8 @@ class OpenLibraryDataProvider(DataProvider):
             "limit": limit,
             **({'sort': sort} if sort else {}),
             "fields": ",".join(fields),
-            # Also pass lang to prefer editions in the requested language.
-            **({'lang': language} if language else {}),
+            # Also pass lang to prefer editions in the reader's first language.
+            **({'lang': primary_language} if primary_language else {}),
         }
         r = _get(f"{OpenLibraryDataProvider.BASE_URL}/search.json", params=params)
         data = r.json()
@@ -2146,9 +2225,9 @@ class OpenLibraryDataProvider(DataProvider):
         # - Multiple editions: reorder so language-matching ones come first.
         # - Single mismatched edition: resolve the preferred edition from OL.
         # This also handles edition_key: queries where OL ignores the lang param.
-        if language:
+        if primary_language:
             records = _align_editions_to_language(
-                records, language,
+                records, primary_language,
                 resolve_mismatched="edition_key:" in query,
             )
 
@@ -2255,17 +2334,29 @@ class OpenLibraryDataProvider(DataProvider):
         # Backward-compatible fallback for pyopds2 versions that lack title.
         if title is not None and "title" not in getattr(DataProvider.SearchResponse, "__dataclass_fields__", {}):
             resp.title = title
-        # Inject title into pagination params so links carry it.
-        # params is a functools.cached_property; setting it on the
-        # instance before first access caches our version.
+        # The pagination links carry every parameter the search was made with,
+        # with the same omit-when-default rules as the facet hrefs so the two
+        # agree: pyopds2's own params know only query, limit, page and sort,
+        # and following ``next`` used to drop the language, the mode, the
+        # media type and the access filter. ``params`` is a
+        # functools.cached_property; setting it on the instance before first
+        # access caches our version.
+        base_params = {
+            **({"query": query} if query else {}),
+            **({"limit": str(limit)} if limit else {}),
+            **({"sort": sort} if sort else {}),
+        }
+        if resp.page > 1:
+            base_params["page"] = str(resp.page)
+        if mode and mode != "everything":
+            base_params["mode"] = mode
+        if language:
+            base_params["language"] = language
+        if media_type:
+            base_params["media_type"] = media_type
+        if access and access != "general":
+            base_params["access"] = access
         if title:
-            base_params = {
-                **({"query": query} if query else {}),
-                **({"limit": str(limit)} if limit else {}),
-                **({"sort": sort} if sort else {}),
-                "title": title,
-            }
-            if resp.page > 1:
-                base_params["page"] = str(resp.page)
-            resp.params = base_params
+            base_params["title"] = title
+        resp.params = base_params
         return resp
