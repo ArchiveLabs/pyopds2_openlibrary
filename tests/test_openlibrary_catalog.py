@@ -790,7 +790,7 @@ class TestFacetCountsAndBuilder:
         assert facets[3]["metadata"]["title"] == "Access"
 
         availability_titles = [l["title"] for l in facets[0]["links"]]
-        assert availability_titles == ["Everything", "Available to Borrow", "Open Access", "Available for Purchase"]
+        assert availability_titles == ["Everything", "Borrow", "Free", "Buy"]
 
         access_titles = [l["title"] for l in facets[3]["links"]]
         assert access_titles == ["General", "Print Disabled"]
@@ -800,7 +800,7 @@ class TestFacetCountsAndBuilder:
             assert "title" in link
             assert "href" in link
 
-        active = next(l for l in facets[0]["links"] if l["title"] == "Available to Borrow")
+        active = next(l for l in facets[0]["links"] if l["title"] == "Borrow")
         assert active["rel"] == "self"
 
         everything = next(l for l in facets[0]["links"] if l["title"] == "Everything")
@@ -825,12 +825,12 @@ class TestFacetCountsAndBuilder:
 
         assert facets[2]["metadata"]["title"] == "Media Type"
         media_titles = [l["title"] for l in facets[2]["links"]]
-        assert media_titles == ["All", "Ebooks", "Audiobooks"]
+        assert media_titles == ["All", "Books", "Audiobooks"]
 
         active = next(l for l in facets[2]["links"] if l["title"] == "Audiobooks")
         assert active["rel"] == "self"
 
-        ebooks = next(l for l in facets[2]["links"] if l["title"] == "Ebooks")
+        ebooks = next(l for l in facets[2]["links"] if l["title"] == "Books")
         parsed = parse_qs(urlparse(ebooks["href"]).query)
         assert parsed.get("media_type") == ["ebook"]
 
@@ -856,9 +856,9 @@ class TestFacetCountsAndBuilder:
 
         availability_links = {l["title"]: l for l in facets[0]["links"]}
         assert availability_links["Everything"]["properties"]["numberOfItems"] == 100
-        assert availability_links["Available to Borrow"]["properties"]["numberOfItems"] == 80
-        assert availability_links["Open Access"]["properties"]["numberOfItems"] == 30
-        assert "properties" not in availability_links["Available for Purchase"]
+        assert availability_links["Borrow"]["properties"]["numberOfItems"] == 80
+        assert availability_links["Free"]["properties"]["numberOfItems"] == 30
+        assert "properties" not in availability_links["Buy"]
 
     def test_build_facets_href_mode_and_sort_params(self):
         facets = build_facets(base_url="https://example.org/opds", query="my query", sort="", mode="everything")
@@ -868,7 +868,7 @@ class TestFacetCountsAndBuilder:
         assert parsed_all.get("language") is None
         assert parsed_all.get("query") == ["my query"]
 
-        buyable_link = next(l for l in facets[0]["links"] if l["title"] == "Available for Purchase")
+        buyable_link = next(l for l in facets[0]["links"] if l["title"] == "Buy")
         parsed_buyable = parse_qs(urlparse(buyable_link["href"]).query)
         assert parsed_buyable.get("mode") == ["buyable"]
 

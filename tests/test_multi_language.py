@@ -239,7 +239,7 @@ class TestHomeFeed:
         links_by_rel = {link.rel: link for link in feed["links"]}
         assert _query_params(links_by_rel["self"].href)["language"] == "en,fr"
         assert _query_params(feed["navigation"][0].href)["language"] == "en,fr"
-        assert links_by_rel["search"].href == "https://example.org/opds/search{?query,language}"
+        assert links_by_rel["search"].href == "https://example.org/opds/search{?query,language,mode,media_type}"
         assert links_by_rel["search"].templated is True
         for group in feed["facets"]:
             for link in group["links"]:

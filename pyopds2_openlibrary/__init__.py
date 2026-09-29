@@ -821,6 +821,53 @@ def canonical_language(raw: Optional[str]) -> Optional[str]:
     return ",".join(codes) if codes else None
 
 
+# The values a ``mode`` list may name, in their canonical order. ``everything``
+# is not one of them: it is what an empty list means.
+_MODE_VALUES: tuple[str, ...] = ("open_access", "ebooks", "buyable", "print_disabled")
+
+# The values a ``media_type`` list may name, in their canonical order.
+_MEDIA_TYPE_VALUES: tuple[str, ...] = ("ebook", "audiobook")
+
+
+def _parse_listed(raw: Optional[str], allowed: tuple[str, ...]) -> list[str]:
+    """Split a comma-separated parameter into the allowed values it names.
+
+    Values are lowercased and stripped; unknown ones and duplicates are
+    dropped.  The result is in ``allowed``'s order rather than the caller's,
+    since the values of these lists (unlike languages) carry no priority —
+    so ``"buyable,ebooks"`` and ``"ebooks, buyable"`` read the same.
+    """
+    if not raw:
+        return []
+    named = {part.strip().lower() for part in raw.split(",")}
+    return [value for value in allowed if value in named]
+
+
+def parse_modes(raw: Optional[str]) -> list[str]:
+    """The availability modes a ``mode`` parameter names: ``"ebooks,buyable"``
+    is ``["ebooks", "buyable"]``; ``"everything"``, empty and unknown values
+    name none, which is everything."""
+    return _parse_listed(raw, _MODE_VALUES)
+
+
+def canonical_mode(raw: Optional[str]) -> str:
+    """The one spelling of a ``mode`` parameter: ``"ebooks,buyable"``, or
+    ``"everything"`` for none.  Idempotent, like ``canonical_language``."""
+    modes = parse_modes(raw)
+    return ",".join(modes) if modes else "everything"
+
+
+def parse_media_types(raw: Optional[str]) -> list[str]:
+    """The media types a ``media_type`` parameter names, in canonical order."""
+    return _parse_listed(raw, _MEDIA_TYPE_VALUES)
+
+
+def canonical_media_type(raw: Optional[str]) -> Optional[str]:
+    """The one spelling of a ``media_type`` parameter, or ``None`` for all."""
+    types = parse_media_types(raw)
+    return ",".join(types) if types else None
+
+
 def _language_solr_clause(raw: Optional[str]) -> Optional[str]:
     """The Solr clause that keeps works in any of the given languages.
 
@@ -948,8 +995,21 @@ _EBOOK_MODE_ALLOWED: dict[str, frozenset[str]] = {
 }
 
 
+# The edition-level ebook_access values each availability mode's Solr clause
+# admits. 'buyable' admits what 'ebooks' does; its real test is client-side.
+_MODE_ACCESS_VALUES: dict[str, tuple[str, ...]] = {
+    "ebooks":         ("borrowable", "printdisabled"),
+    "print_disabled": ("printdisabled",),
+    "open_access":    ("public",),
+    "buyable":        ("borrowable", "printdisabled"),
+}
+
+
 def _mode_ebook_access_clause(mode: str) -> str:
     """Return the Solr ``ebook_access`` clause for an availability *mode*.
+
+    *mode* may be a list (``"ebooks,open_access"``): the clause admits what
+    any of the listed modes admits, an OR of their values.
 
     Single source of truth shared by ``search`` and ``_count_for_mode`` so the
     displayed results and the per-mode facet counts can never drift apart.
@@ -964,16 +1024,39 @@ def _mode_ebook_access_clause(mode: str) -> str:
     print-only works that ``_has_acquisition_options`` then silently drops,
     leaving an empty feed with an inflated ``numFound`` total.
     """
-    if mode == 'ebooks':
-        return "ebook_access:(borrowable OR printdisabled)"
-    if mode == 'print_disabled':
-        return "ebook_access:printdisabled"
-    if mode == 'open_access':
-        return "ebook_access:public"
-    if mode == 'buyable':
-        return "ebook_access:(borrowable OR printdisabled)"
-    # everything
-    return "ebook_access:(borrowable OR printdisabled OR public)"
+    modes = parse_modes(mode)
+    if not modes:
+        # everything
+        return "ebook_access:(borrowable OR printdisabled OR public)"
+    values: list[str] = []
+    for m in modes:
+        for value in _MODE_ACCESS_VALUES[m]:
+            if value not in values:
+                values.append(value)
+    # The servable values in the order the single-mode clauses always spelled
+    # them, so a list's clause and a single mode's never differ in spelling.
+    values.sort(key=["borrowable", "printdisabled", "public"].index)
+    if len(values) == 1:
+        return f"ebook_access:{values[0]}"
+    return f"ebook_access:({' OR '.join(values)})"
+
+
+def _passes_mode(record: "OpenLibraryDataRecord", mode: str) -> bool:
+    """Whether a record belongs under one availability mode, after edition
+    resolution — the post-filter ``search`` applies, per listed mode.
+
+    ``open_access`` keeps the work-level fallback: a public-domain work whose
+    language-preferred edition is borrowable is still genuinely open.  The
+    others use the displayed edition only — the work-level fallback leaked
+    open-access editions into "Borrow".  ``buyable`` is a test of providers;
+    Solr has no field for it.
+    """
+    if mode == "buyable":
+        return _has_buyable_provider(record)
+    allowed = _EBOOK_MODE_ALLOWED[mode]
+    if mode == "open_access":
+        return _get_edition_ebook_access(record) in allowed or record.ebook_access in allowed
+    return _get_edition_ebook_access(record) in allowed
 
 _EBOOK_ACCESS_RANK = {
     "public": 3,
@@ -1141,9 +1224,9 @@ def _align_editions_to_language(
 # Single canonical label per mode — used by both build_facets and build_home_facets.
 _AVAILABILITY_MODES: list[tuple[str, str]] = [
     ("everything",     "Everything"),
-    ("ebooks",         "Available to Borrow"),
-    ("open_access",    "Open Access"),
-    ("buyable",        "Available for Purchase"),
+    ("ebooks",         "Borrow"),
+    ("open_access",    "Free"),
+    ("buyable",        "Buy"),
 ]
 
 # All homepage groups are always attempted regardless of language corpus size;
@@ -1155,7 +1238,7 @@ _AVAILABILITY_MODES: list[tuple[str, str]] = [
 # ``None`` means "no media type filter" (All).
 _MEDIA_TYPE_OPTIONS: list[tuple[Optional[str], str]] = [
     (None, "All"),
-    ("ebook", "Ebooks"),
+    ("ebook", "Books"),
     ("audiobook", "Audiobooks"),
 ]
 
@@ -1172,8 +1255,13 @@ def _build_availability_links(
     Each caller supplies its own ``href_fn`` (Open/Closed) so this function
     never needs to change when a new page type needs availability facets.
 
+    Each option's link narrows to that one mode; with a list applied, every
+    listed mode's link is marked ``rel: "self"``, and "Everything" only when
+    none is.
+
     Args:
-        mode: Currently active mode value (e.g. ``"ebooks"``).
+        mode: Currently active mode value (e.g. ``"ebooks"``), or a list of
+            them (``"ebooks,buyable"``).
         href_fn: Converts a mode value string to a full URL.
         labels: ``{mode_value: display_label}`` overrides.  Unspecified modes
             fall back to the search-page label in ``_AVAILABILITY_MODES``.
@@ -1184,6 +1272,7 @@ def _build_availability_links(
     resolved = {**default_labels, **(labels or {})}
     counts = counts or {}
     exclude = exclude or set()
+    selected = parse_modes(mode)
     links = []
     for val, _ in _AVAILABILITY_MODES:
         if val in exclude:
@@ -1193,7 +1282,7 @@ def _build_availability_links(
             "href": href_fn(val),
             "type": "application/opds+json",
         }
-        if val == mode:
+        if (val == "everything" and not selected) or val in selected:
             link["rel"] = "self"
             link.setdefault("properties", {})["active"] = True
         count = counts.get(val)
@@ -1263,11 +1352,13 @@ def _apply_media_type_filter(query: str, media_type: Optional[str]) -> str:
       works that have a LibriVox audio recording on the Internet Archive.
     - ``media_type="ebook"`` appends ``ebook_access:[printdisabled TO *]``
       when that filter is not already present.
-    - ``media_type=None`` returns the query unchanged.
+    - ``media_type=None`` returns the query unchanged, and so does the list
+      of both: every servable work is one or the other.
     """
-    if media_type == "audiobook":
+    types = parse_media_types(media_type)
+    if types == ["audiobook"]:
         return f"{query} id_librivox:*".strip()
-    if media_type == "ebook" and "ebook_access:" not in query:
+    if types == ["ebook"] and "ebook_access:" not in query:
         return f"{query} ebook_access:[printdisabled TO *]".strip()
     return query
 
@@ -1276,7 +1367,12 @@ def _build_media_type_links(
     media_type: Optional[str],
     href_fn: typing.Callable[[Optional[str]], str],
 ) -> list[dict]:
-    """Build the list of media type facet link dicts per OPDS 2.0 §2.4."""
+    """Build the list of media type facet link dicts per OPDS 2.0 §2.4.
+
+    As with availability: each link narrows to one type, and with a list
+    applied every listed type is marked ``rel: "self"``.
+    """
+    selected = parse_media_types(media_type)
     links = []
     for mt_code, label in _MEDIA_TYPE_OPTIONS:
         link: dict = {
@@ -1284,7 +1380,7 @@ def _build_media_type_links(
             "href": href_fn(mt_code),
             "type": "application/opds+json",
         }
-        if mt_code == media_type:
+        if (mt_code is None and not selected) or mt_code in selected:
             link["rel"] = "self"
             link.setdefault("properties", {})["active"] = True
         links.append(link)
@@ -1427,7 +1523,7 @@ class OpenLibraryDataProvider(DataProvider):
         (all languages) while the active mode's count is language-filtered,
         letting a subset mode report a larger count than the superset.
         """
-        if mode == 'buyable':
+        if 'buyable' in parse_modes(mode):
             # Buyable is filtered client-side (_has_buyable_provider); Solr
             # has no field for it so we cannot produce an accurate count.
             return None
@@ -1588,6 +1684,8 @@ class OpenLibraryDataProvider(DataProvider):
             availability_counts: ``{mode_value: item_count}`` per OPDS 2.0 §2.4.
         """
         language = canonical_language(language)
+        mode = canonical_mode(mode)
+        media_type = canonical_media_type(media_type)
 
         def search_href(
             sort_val: Optional[str] = sort,
@@ -1678,6 +1776,8 @@ class OpenLibraryDataProvider(DataProvider):
                 or ``None`` for all media types.
         """
         language = canonical_language(language)
+        mode = canonical_mode(mode)
+        media_type = canonical_media_type(media_type)
 
         def home_href(val: str) -> str:
             params: dict[str, str] = {}
@@ -1778,6 +1878,8 @@ class OpenLibraryDataProvider(DataProvider):
         between facets.
         """
         language = canonical_language(language)
+        mode = canonical_mode(mode)
+        media_type = canonical_media_type(media_type)
 
         def author_href(
             mode_val: str = mode,
@@ -1999,6 +2101,8 @@ class OpenLibraryDataProvider(DataProvider):
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
         language = canonical_language(language)
+        mode = canonical_mode(mode)
+        media_type = canonical_media_type(media_type)
         subjects = featured_subjects if featured_subjects is not None else cls.FEATURED_SUBJECTS
         media = cls.OPDS_MEDIA_TYPE
         search_url = cls.SEARCH_URL
@@ -2079,6 +2183,8 @@ class OpenLibraryDataProvider(DataProvider):
                     "title": subject["presentable_name"],
                     "query": q,
                 }
+                if mode != "everything":
+                    nav_params["mode"] = mode
                 if language:
                     nav_params["language"] = language
                 if media_type:
@@ -2093,7 +2199,7 @@ class OpenLibraryDataProvider(DataProvider):
         links = [
             Link(rel="self", href=cls._home_page_href(base, mode, language, page, media_type, access), type=media),
             Link(rel="start", href=f"{base}/", type=media),
-            Link(rel="search", href=f"{base}/search{{?query,language}}", type=media, templated=True),
+            Link(rel="search", href=f"{base}/search{{?query,language,mode,media_type}}", type=media, templated=True),
             cls.bookshelf_link(),
             cls.profile_link(),
         ]
@@ -2159,6 +2265,7 @@ class OpenLibraryDataProvider(DataProvider):
         language = canonical_language(language)
         languages = parse_languages(language)
         primary_language = languages[0] if languages else None
+        media_type = canonical_media_type(media_type)
 
         fields = [
             "key", "title", "editions", "description", "providers", "author_name", "ia",
@@ -2168,10 +2275,10 @@ class OpenLibraryDataProvider(DataProvider):
         ]
 
         internal_query = query
-        if facets:
-            mode = facets.get('mode', 'everything')
-        else:
-            mode = 'everything'
+        # ``mode`` may be a list: a record is kept if it belongs under any of
+        # the listed modes.
+        mode = canonical_mode(facets.get('mode') if facets else None)
+        modes = parse_modes(mode)
 
         # Mode wins: strip any ebook_access clause baked into the query
         # (group queries like Standard Ebooks add ebook_access:public,
@@ -2245,7 +2352,7 @@ class OpenLibraryDataProvider(DataProvider):
         # records (works whose primary content is a LibriVox audio recording).
         # LibriVox works have ebook_access:public so they survive mode filters,
         # but they belong in the audiobook facet, not the ebook facet.
-        if media_type == "ebook":
+        if media_type == "ebook":  # canonical: "ebook" alone, not with audiobook
             records = [r for r in records if not r.id_librivox]
 
         # Access filter: control print-disabled visibility.
@@ -2259,35 +2366,20 @@ class OpenLibraryDataProvider(DataProvider):
                        if _get_edition_ebook_access(r) != "printdisabled"
                        and r.ebook_access != "printdisabled"]
 
-        if access != "print_disabled" and mode in ('ebooks', 'print_disabled', 'open_access', 'buyable'):
-            if mode == 'buyable':
-                # Keep only records that have a non-free provider.
-                # This is a client-side filter (Solr has no buyable field).
-                records = [r for r in records if _has_buyable_provider(r)]
+        # Strict post-filter: enforce each listed mode's boundary after all
+        # edition resolution (see _passes_mode), keeping a record that belongs
+        # under any of them. Open-access books must never appear under
+        # borrow-only filters, and 'buyable' is only testable here.
+        if access != "print_disabled" and modes:
+            records = [r for r in records if any(_passes_mode(r, m) for m in modes)]
             # Sort available books before unavailable, preserving order within each group
             records.sort(key=lambda r: (0 if _is_currently_available(r) else 1))
         elif access == "print_disabled":
             records.sort(key=lambda r: (0 if _is_currently_available(r) else 1))
 
-        # Strict post-filter: enforce ebook_access boundaries after all edition resolution.
-        # For ``open_access``: keep the work-level OR fallback — a public-domain
-        # work whose language-preferred edition is borrowable should still appear
-        # because the work is genuinely open.
-        # For ``ebooks`` / ``print_disabled``: use the displayed edition only.
-        # The work-level OR fallback was leaking open-access editions into the
-        # "Available to Borrow" facet (work=borrowable but the edition the user
-        # actually sees is public). Open-access books must never appear under
-        # borrow-only filters.
-        if access != "print_disabled" and mode in _EBOOK_MODE_ALLOWED:
-            allowed = _EBOOK_MODE_ALLOWED[mode]
-            if mode == "open_access":
-                records = [r for r in records if _get_edition_ebook_access(r) in allowed or r.ebook_access in allowed]
-            else:
-                records = [r for r in records if _get_edition_ebook_access(r) in allowed]
-
         # Set total for buyable after ALL filters — client-side filtering means Solr
         # cannot produce an accurate count; use the final post-filter record count.
-        if mode == 'buyable':
+        if 'buyable' in modes:
             total = len(records)
 
         # Resolve non-Latin author names (e.g. Cyrillic) to their Latin personal_name.

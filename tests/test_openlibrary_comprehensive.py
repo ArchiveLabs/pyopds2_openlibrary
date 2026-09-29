@@ -1095,16 +1095,16 @@ class TestResolvePreferredEdition:
 class TestAvailabilityFacetPrimitive:
     def test_all_modes_included_by_default(self):
         links = _build_availability_links(mode="everything", href_fn=lambda m: f"/search?mode={m}")
-        assert [l["title"] for l in links] == ["Everything", "Available to Borrow", "Open Access", "Available for Purchase"]
+        assert [l["title"] for l in links] == ["Everything", "Borrow", "Free", "Buy"]
 
     def test_active_mode_gets_self_rel(self):
         links = _build_availability_links(mode="ebooks", href_fn=lambda m: f"/search?mode={m}")
-        ebooks = next(l for l in links if l["title"] == "Available to Borrow")
+        ebooks = next(l for l in links if l["title"] == "Borrow")
         assert ebooks["rel"] == "self"
 
     def test_inactive_modes_have_no_rel(self):
         links = _build_availability_links(mode="ebooks", href_fn=lambda m: f"/search?mode={m}")
-        non_active = [l for l in links if l["title"] != "Available to Borrow"]
+        non_active = [l for l in links if l["title"] != "Borrow"]
         assert all("rel" not in l for l in non_active)
 
     def test_custom_labels_applied(self):
@@ -1132,7 +1132,7 @@ class TestAvailabilityFacetPrimitive:
             exclude={"buyable"},
         )
         assert len(links) == 3
-        assert all(l["title"] != "Available for Purchase" for l in links)
+        assert all(l["title"] != "Buy" for l in links)
 
 
 class TestFacetBuilders:
@@ -1147,7 +1147,7 @@ class TestFacetBuilders:
     def test_build_facets_availability_links_titles(self):
         facets = build_facets(base_url="https://example.org/opds", query="cats")
         titles = [l["title"] for l in facets[0]["links"]]
-        assert titles == ["Everything", "Available to Borrow", "Open Access", "Available for Purchase"]
+        assert titles == ["Everything", "Borrow", "Free", "Buy"]
         
         # Check Access facet exists and has correct links
         access_titles = [l["title"] for l in facets[3]["links"]]
@@ -1156,13 +1156,13 @@ class TestFacetBuilders:
     def test_build_facets_media_type_links_titles(self):
         facets = build_facets(base_url="https://example.org/opds", query="cats", media_type="ebook")
         titles = [l["title"] for l in facets[2]["links"]]
-        assert titles == ["All", "Ebooks", "Audiobooks"]
-        active = next(l for l in facets[2]["links"] if l["title"] == "Ebooks")
+        assert titles == ["All", "Books", "Audiobooks"]
+        active = next(l for l in facets[2]["links"] if l["title"] == "Books")
         assert active["rel"] == "self"
 
     def test_build_facets_active_availability_has_self_rel(self):
         facets = build_facets(base_url="https://example.org/opds", query="cats", mode="open_access")
-        active = next(l for l in facets[0]["links"] if l["title"] == "Open Access")
+        active = next(l for l in facets[0]["links"] if l["title"] == "Free")
         assert active["rel"] == "self"
 
     def test_build_facets_number_of_items_and_language_param(self):
@@ -1178,9 +1178,9 @@ class TestFacetBuilders:
         )
         availability_links = {l["title"]: l for l in facets[0]["links"]}
         assert availability_links["Everything"]["properties"]["numberOfItems"] == 100
-        assert availability_links["Available to Borrow"]["properties"]["numberOfItems"] == 80
-        assert availability_links["Open Access"]["properties"]["numberOfItems"] == 30
-        assert "properties" not in availability_links["Available for Purchase"]
+        assert availability_links["Borrow"]["properties"]["numberOfItems"] == 80
+        assert availability_links["Free"]["properties"]["numberOfItems"] == 30
+        assert "properties" not in availability_links["Buy"]
         for link in facets[0]["links"]:
             parsed = parse_qs(urlparse(link["href"]).query)
             assert parsed.get("language") is None
@@ -1201,7 +1201,7 @@ class TestFacetBuilders:
 
     def test_build_home_facets_uses_home_labels(self):
         facets = OpenLibraryDataProvider.build_home_facets(base_url="https://example.org/opds", mode="everything")
-        assert [l["title"] for l in facets[0]["links"]] == ["Everything", "Available to Borrow", "Open Access"]
+        assert [l["title"] for l in facets[0]["links"]] == ["Everything", "Borrow", "Free"]
 
     def test_build_home_facets_excludes_buyable(self):
         facets = OpenLibraryDataProvider.build_home_facets(base_url="https://example.org/opds", mode="everything")
