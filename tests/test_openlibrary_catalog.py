@@ -790,7 +790,7 @@ class TestFacetCountsAndBuilder:
         assert facets[3]["metadata"]["title"] == "Access"
 
         availability_titles = [l["title"] for l in facets[0]["links"]]
-        assert availability_titles == ["Everything", "Borrow", "Free", "Buy"]
+        assert availability_titles == ["Everything", "Borrow", "Open Access", "Buy"]
 
         access_titles = [l["title"] for l in facets[3]["links"]]
         assert access_titles == ["General", "Print Disabled"]
@@ -857,7 +857,7 @@ class TestFacetCountsAndBuilder:
         availability_links = {l["title"]: l for l in facets[0]["links"]}
         assert availability_links["Everything"]["properties"]["numberOfItems"] == 100
         assert availability_links["Borrow"]["properties"]["numberOfItems"] == 80
-        assert availability_links["Free"]["properties"]["numberOfItems"] == 30
+        assert availability_links["Open Access"]["properties"]["numberOfItems"] == 30
         assert "properties" not in availability_links["Buy"]
 
     def test_build_facets_href_mode_and_sort_params(self):

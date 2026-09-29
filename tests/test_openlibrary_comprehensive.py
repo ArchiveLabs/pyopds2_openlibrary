@@ -1095,7 +1095,7 @@ class TestResolvePreferredEdition:
 class TestAvailabilityFacetPrimitive:
     def test_all_modes_included_by_default(self):
         links = _build_availability_links(mode="everything", href_fn=lambda m: f"/search?mode={m}")
-        assert [l["title"] for l in links] == ["Everything", "Borrow", "Free", "Buy"]
+        assert [l["title"] for l in links] == ["Everything", "Borrow", "Open Access", "Buy"]
 
     def test_active_mode_gets_self_rel(self):
         links = _build_availability_links(mode="ebooks", href_fn=lambda m: f"/search?mode={m}")
@@ -1147,7 +1147,7 @@ class TestFacetBuilders:
     def test_build_facets_availability_links_titles(self):
         facets = build_facets(base_url="https://example.org/opds", query="cats")
         titles = [l["title"] for l in facets[0]["links"]]
-        assert titles == ["Everything", "Borrow", "Free", "Buy"]
+        assert titles == ["Everything", "Borrow", "Open Access", "Buy"]
         
         # Check Access facet exists and has correct links
         access_titles = [l["title"] for l in facets[3]["links"]]
@@ -1162,7 +1162,7 @@ class TestFacetBuilders:
 
     def test_build_facets_active_availability_has_self_rel(self):
         facets = build_facets(base_url="https://example.org/opds", query="cats", mode="open_access")
-        active = next(l for l in facets[0]["links"] if l["title"] == "Free")
+        active = next(l for l in facets[0]["links"] if l["title"] == "Open Access")
         assert active["rel"] == "self"
 
     def test_build_facets_number_of_items_and_language_param(self):
@@ -1179,7 +1179,7 @@ class TestFacetBuilders:
         availability_links = {l["title"]: l for l in facets[0]["links"]}
         assert availability_links["Everything"]["properties"]["numberOfItems"] == 100
         assert availability_links["Borrow"]["properties"]["numberOfItems"] == 80
-        assert availability_links["Free"]["properties"]["numberOfItems"] == 30
+        assert availability_links["Open Access"]["properties"]["numberOfItems"] == 30
         assert "properties" not in availability_links["Buy"]
         for link in facets[0]["links"]:
             parsed = parse_qs(urlparse(link["href"]).query)
@@ -1201,7 +1201,7 @@ class TestFacetBuilders:
 
     def test_build_home_facets_uses_home_labels(self):
         facets = OpenLibraryDataProvider.build_home_facets(base_url="https://example.org/opds", mode="everything")
-        assert [l["title"] for l in facets[0]["links"]] == ["Everything", "Borrow", "Free"]
+        assert [l["title"] for l in facets[0]["links"]] == ["Everything", "Borrow", "Open Access"]
 
     def test_build_home_facets_excludes_buyable(self):
         facets = OpenLibraryDataProvider.build_home_facets(base_url="https://example.org/opds", mode="everything")

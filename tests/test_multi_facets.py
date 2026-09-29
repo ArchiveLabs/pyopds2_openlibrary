@@ -2,7 +2,7 @@
 work that belongs under either.
 
 The reader app renders the Availability and Media Type facet groups as
-checkboxes, so a reader can tick "Borrow" and "Free" together. The feed ORs
+checkboxes, so a reader can tick "Borrow" and "Open Access" together. The feed ORs
 the ticked values, spells the list one way wherever it emits it, and marks
 every ticked option ``rel: "self"``.
 """
@@ -199,7 +199,7 @@ class TestFacets:
 
     def test_every_listed_mode_is_marked(self):
         links = _build_availability_links(mode="ebooks,open_access", href_fn=lambda m: m)
-        assert sorted(l["title"] for l in links if l.get("rel") == "self") == ["Borrow", "Free"]
+        assert sorted(l["title"] for l in links if l.get("rel") == "self") == ["Borrow", "Open Access"]
 
     def test_each_option_still_narrows_to_one_mode(self):
         links = _build_availability_links(mode="ebooks,open_access", href_fn=lambda m: f"?mode={m}")
@@ -210,7 +210,7 @@ class TestFacets:
     def test_the_labels_are_short(self):
         availability = _build_availability_links(mode="everything", href_fn=lambda m: m)
         media = _build_media_type_links(media_type=None, href_fn=lambda m: str(m))
-        assert [l["title"] for l in availability] == ["Everything", "Borrow", "Free", "Buy"]
+        assert [l["title"] for l in availability] == ["Everything", "Borrow", "Open Access", "Buy"]
         assert [l["title"] for l in media] == ["All", "Books", "Audiobooks"]
 
     def test_every_listed_media_type_is_marked(self):

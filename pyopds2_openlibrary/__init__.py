@@ -1225,7 +1225,7 @@ def _align_editions_to_language(
 _AVAILABILITY_MODES: list[tuple[str, str]] = [
     ("everything",     "Everything"),
     ("ebooks",         "Borrow"),
-    ("open_access",    "Free"),
+    ("open_access",    "Open Access"),
     ("buyable",        "Buy"),
 ]
 
