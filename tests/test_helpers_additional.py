@@ -61,7 +61,7 @@ def test_build_availability_links_counts_and_active():
     assert 'Everything' in titles
     # active should be present for 'ebooks'
     active = [l for l in links if l.get('rel') == 'self']
-    assert active and active[0]['title'] == 'Available to Borrow'
+    assert active and active[0]['title'] == 'Borrow'
     # numberOfItems appears where provided
     num_items = [l.get('properties', {}).get('numberOfItems') for l in links]
     assert 2 in num_items
