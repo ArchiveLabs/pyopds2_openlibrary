@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch
 from urllib.parse import parse_qs, urlparse
 
 import pytest
-from pyopds2 import Catalog
+from pyopds2 import Catalog, has_rel
 
 import pyopds2_openlibrary as openlibrary
 from pyopds2_openlibrary import (
@@ -209,6 +209,7 @@ class TestHomeFeed:
         def __init__(self, **kwargs):
             self.kwargs = kwargs
             self.publications = kwargs.get("publications", [])
+            self.links = kwargs.get("links", [])
 
         @staticmethod
         def create(*args, **kwargs):
@@ -275,17 +276,17 @@ class TestLanguageFacet:
 
     def test_nothing_selected_marks_all_active(self):
         links = self._links(None)
-        assert [l["title"] for l in links if l.get("rel") == "self"] == ["All"]
+        assert [l["title"] for l in links if has_rel(l, "self")] == ["All"]
 
     def test_one_language_marks_itself_active(self):
         links = self._links("fr")
-        assert [l["title"] for l in links if l.get("rel") == "self"] == ["French"]
+        assert [l["title"] for l in links if has_rel(l, "self")] == ["French"]
 
     def test_several_languages_mark_nothing_active(self):
         # The links stay single-select, as OPDS facets are: a selection of
         # several is not any one of them, and "All" is not it either.
         links = self._links("en,fr", counts={"en": 1, "fr": 1, "de": 1})
-        assert [l for l in links if l.get("rel") == "self"] == []
+        assert [l for l in links if has_rel(l, "self")] == []
         assert all("active" not in l.get("properties", {}) for l in links)
 
     def test_each_link_narrows_to_one_language(self):

@@ -1,6 +1,7 @@
 import pytest
 from unittest.mock import patch
 
+from pyopds2 import has_rel
 from pyopds2_openlibrary import (
     map_ol_format_to_mime,
     strip_markdown,
@@ -60,7 +61,7 @@ def test_build_availability_links_counts_and_active():
     titles = [l['title'] for l in links]
     assert 'Everything' in titles
     # active should be present for 'ebooks'
-    active = [l for l in links if l.get('rel') == 'self']
+    active = [l for l in links if has_rel(l, 'self')]
     assert active and active[0]['title'] == 'Borrow'
     # numberOfItems appears where provided
     num_items = [l.get('properties', {}).get('numberOfItems') for l in links]

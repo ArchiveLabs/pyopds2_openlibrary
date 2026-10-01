@@ -4,7 +4,7 @@ import httpx
 import pytest
 from urllib.parse import parse_qs, urlparse
 from unittest.mock import patch, MagicMock
-from pyopds2 import Catalog
+from pyopds2 import Catalog, has_rel
 import pyopds2_openlibrary as openlibrary
 
 from pyopds2_openlibrary import (
@@ -801,7 +801,7 @@ class TestFacetCountsAndBuilder:
             assert "href" in link
 
         active = next(l for l in facets[0]["links"] if l["title"] == "Borrow")
-        assert active["rel"] == "self"
+        assert has_rel(active, "self")
 
         everything = next(l for l in facets[0]["links"] if l["title"] == "Everything")
         parsed = parse_qs(urlparse(everything["href"]).query)
@@ -828,7 +828,7 @@ class TestFacetCountsAndBuilder:
         assert media_titles == ["All", "Books", "Audiobooks"]
 
         active = next(l for l in facets[2]["links"] if l["title"] == "Audiobooks")
-        assert active["rel"] == "self"
+        assert has_rel(active, "self")
 
         ebooks = next(l for l in facets[2]["links"] if l["title"] == "Books")
         parsed = parse_qs(urlparse(ebooks["href"]).query)
