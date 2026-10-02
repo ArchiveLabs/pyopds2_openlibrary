@@ -661,13 +661,6 @@ def _latin_name_for_author(olid: str, current_name: str) -> str:
 class AuthorInfo(typing.NamedTuple):
     """What the author page needs from ``/authors/<olid>.json``.
 
-    ``bio`` is the author's full biography; ``description`` the one-line
-    summary Open Library shows under the portrait, which is the English
-    description of the author's Wikidata item (``remote_ids.wikidata``),
-    e.g. "French philosopher, author, and journalist (1913–1960)". It is
-    ``None`` for an author without a Wikidata item or whose item has no
-    English description.
-
     ``photo_width``/``photo_height`` are the pixel size of the ``-L``
     rendition at ``https://covers.openlibrary.org/a/id/<photo_id>-L.jpg``,
     or ``None`` when unknown.
@@ -677,12 +670,9 @@ class AuthorInfo(typing.NamedTuple):
     photo_id: Optional[int]
     photo_width: Optional[int]
     photo_height: Optional[int]
-    description: Optional[str] = None
 
 
-_NO_AUTHOR_INFO = AuthorInfo(None, None, None, None, None, None)
-
-WIKIDATA_API_URL: str = "https://www.wikidata.org/w/rest.php/wikibase/v1/entities/items/"
+_NO_AUTHOR_INFO = AuthorInfo(None, None, None, None, None)
 
 
 def _first_photo_id(photos: object) -> Optional[int]:
@@ -703,27 +693,12 @@ def _fetch_photo_size(photo_id: int) -> Optional[tuple[int, int]]:
     return _fit_cover_size(data.get("width"), data.get("height"))
 
 
-def _fetch_wikidata_description(qid: str, language: str = "en") -> Optional[str]:
-    """The one-line description of Wikidata item *qid* in *language*,
-    falling back to English, as Open Library shows it under an author's
-    portrait. ``None`` when the item has no such description.
-    """
-    data = _get(f"{WIKIDATA_API_URL}{qid}").json()
-    descriptions = data.get("descriptions") or {}
-    description = descriptions.get(language) or descriptions.get("en")
-    if not isinstance(description, str):
-        return None
-    return description.strip() or None
-
-
 def fetch_author_info(olid: str) -> AuthorInfo:
-    """Fetch name, bio, short description and photo of an author from the
-    OpenLibrary author API.
+    """Fetch name, bio and photo of an author from the OpenLibrary author API.
 
-    The bio has been stripped of Markdown/HTML. The description comes from
-    the author's Wikidata item; a failure to fetch it only drops the
-    description, as a failure to size the photo only drops the size. Any
-    other failure returns an all-``None`` ``AuthorInfo``. Never raises.
+    The bio has been stripped of Markdown/HTML. A failure to size the photo
+    only drops the size; any other failure returns an all-``None``
+    ``AuthorInfo``. Never raises.
     """
     try:
         r = _get(f"{OpenLibraryDataProvider.BASE_URL}/authors/{olid}.json")
@@ -742,16 +717,8 @@ def fetch_author_info(olid: str) -> AuthorInfo:
             raw_bio = raw_bio.get("value")
         bio: Optional[str] = strip_markdown(raw_bio) if raw_bio else None
         photo_id = _first_photo_id(data.get("photos"))
-        remote_ids = data.get("remote_ids")
-        qid = remote_ids.get("wikidata") if isinstance(remote_ids, dict) else None
     except Exception:
         return _NO_AUTHOR_INFO
-    description: Optional[str] = None
-    if isinstance(qid, str) and qid:
-        try:
-            description = _fetch_wikidata_description(qid)
-        except Exception:
-            description = None
     size: Optional[tuple[int, int]] = None
     if photo_id:
         try:
@@ -759,7 +726,7 @@ def fetch_author_info(olid: str) -> AuthorInfo:
         except Exception:
             size = None
     width, height = size if size else (None, None)
-    return AuthorInfo(name, bio, photo_id, width, height, description)
+    return AuthorInfo(name, bio, photo_id, width, height)
 
 
 def fetch_author_bio(olid: str) -> tuple[Optional[str], Optional[str]]:

@@ -1,8 +1,6 @@
-"""The author page's raw material: name, bio and photo from ``/authors/<olid>.json``,
-and the one-line description from the author's Wikidata item.
+"""The author page's raw material: name, bio and photo from ``/authors/<olid>.json``.
 
-The description is what openlibrary.org shows under the portrait: the
-English description of the item named by ``remote_ids.wikidata``. The photo is linked as the ``-L`` rendition; its advertised size must be the
+The photo is linked as the ``-L`` rendition; its advertised size must be the
 size of that exact file, so it comes from the covers server's metadata run
 through the same box fit as book covers, and is omitted when unknown.
 """
@@ -22,14 +20,10 @@ from pyopds2_openlibrary import (
 
 AUTHOR_URL = "https://openlibrary.org/authors/OL31353A.json"
 PHOTO_URL = "https://covers.openlibrary.org/a/id/15165689.json"
-WIKIDATA_URL = "https://www.wikidata.org/w/rest.php/wikibase/v1/entities/items/Q181659"
-LE_GUIN = {"name": "Ursula K. Le Guin", "remote_ids": {"wikidata": "Q181659"}}
-LE_GUIN_DESCRIPTION = "American fantasy and science fiction author (1929–2018)"
 
 
-def _responses(author: dict, photo: dict | Exception | None = None,
-               wikidata: dict | Exception | None = None):
-    """A ``_get`` side effect answering the author, photo metadata and Wikidata URLs."""
+def _responses(author: dict, photo: dict | Exception | None = None):
+    """A ``_get`` side effect answering the author and photo metadata URLs."""
     def get(url, **_):
         if url == AUTHOR_URL:
             r = MagicMock(); r.json.return_value = author; return r
@@ -37,10 +31,6 @@ def _responses(author: dict, photo: dict | Exception | None = None,
             if isinstance(photo, Exception):
                 raise photo
             r = MagicMock(); r.json.return_value = photo; return r
-        if url == WIKIDATA_URL:
-            if isinstance(wikidata, Exception):
-                raise wikidata
-            r = MagicMock(); r.json.return_value = wikidata; return r
         raise AssertionError(f"unexpected url {url}")
     return get
 
@@ -118,45 +108,6 @@ class TestFetchAuthorInfo:
         openlibrary._latin_author_cache.pop("OL31353A", None)
         assert fetch_author_info("OL31353A").name == "Ivan Petrov"
         assert openlibrary._latin_author_cache["OL31353A"] == "Ivan Petrov"
-
-    @patch("pyopds2_openlibrary._get")
-    def test_the_description_is_the_wikidata_items_english_description(self, mock_get):
-        mock_get.side_effect = _responses(
-            {**LE_GUIN, "bio": "A long biography."},
-            wikidata={"id": "Q181659", "descriptions": {"en": LE_GUIN_DESCRIPTION, "fr": "autrice"}},
-        )
-        info = fetch_author_info("OL31353A")
-        assert info.description == LE_GUIN_DESCRIPTION
-        assert info.bio == "A long biography."
-        assert mock_get.call_args_list[1].args == (WIKIDATA_URL,)
-
-    @patch("pyopds2_openlibrary._get")
-    def test_no_wikidata_item_means_no_description_and_no_request_for_one(self, mock_get):
-        mock_get.side_effect = _responses({"name": "A", "bio": "B"})
-        assert fetch_author_info("OL31353A").description is None
-        assert mock_get.call_count == 1
-        mock_get.side_effect = _responses({"name": "A", "remote_ids": {"viaf": "1"}})
-        assert fetch_author_info("OL31353A").description is None
-
-    @patch("pyopds2_openlibrary._get")
-    def test_an_item_without_an_english_description_gives_none(self, mock_get):
-        mock_get.side_effect = _responses(LE_GUIN, wikidata={"id": "Q181659", "descriptions": {"fr": "autrice"}})
-        assert fetch_author_info("OL31353A").description is None
-        mock_get.side_effect = _responses(LE_GUIN, wikidata={"id": "Q181659", "descriptions": {"en": "  "}})
-        assert fetch_author_info("OL31353A").description is None
-        mock_get.side_effect = _responses(LE_GUIN, wikidata={"id": "Q181659"})
-        assert fetch_author_info("OL31353A").description is None
-
-    @patch("pyopds2_openlibrary._get")
-    def test_a_failed_wikidata_fetch_keeps_the_rest_and_drops_the_description(self, mock_get):
-        mock_get.side_effect = _responses(
-            {**LE_GUIN, "bio": "B", "photos": [15165689]},
-            photo={"width": 100, "height": 100},
-            wikidata=RuntimeError("wikidata down"),
-        )
-        info = fetch_author_info("OL31353A")
-        assert info.name == "Ursula K. Le Guin" and info.bio == "B" and info.photo_id == 15165689
-        assert info.description is None
 
     @patch("pyopds2_openlibrary._get")
     def test_fetch_author_bio_is_the_name_and_bio_pair(self, mock_get):
