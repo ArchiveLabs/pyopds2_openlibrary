@@ -1221,6 +1221,30 @@ def _align_editions_to_language(
 # Shared availability-facet primitives
 # ---------------------------------------------------------------------------
 
+# Link relations the feed emits beyond the registered ones (``self``, ``next``,
+# ``search``, …). ``REL_SORT_POPULAR`` is OPDS's own; the facet relations are
+# extension relations (RFC 8288), so each is a URL under a host we control that
+# resolves to the page documenting it, served by opds.openlibrary.org's ``/rel/``
+# route. They are fixed strings, not built from the deployment's base URL: a
+# relation names a kind of link, the same on every host.
+#
+# Every option link of a facet group carries that group's relation, so a client
+# can find the Availability picker by relation whatever its title says, and the
+# applied option carries ``["self", <group relation>]``.
+REL_FACET_AVAILABILITY: str = "https://openlibrary.org/opds/rel/facet/availability"
+REL_FACET_LANGUAGE: str = "https://openlibrary.org/opds/rel/facet/language"
+REL_FACET_MEDIA_TYPE: str = "https://openlibrary.org/opds/rel/facet/media-type"
+REL_FACET_ACCESS: str = "https://openlibrary.org/opds/rel/facet/access"
+# The trending carousel's self link also carries this registered relation.
+REL_SORT_POPULAR: str = "http://opds-spec.org/sort/popular"
+
+
+def _set_facet_rel(link: dict, rel: str, active: bool) -> None:
+    """Give a facet option link its group's relation, plus ``self`` when it is
+    the applied option (OPDS 2.0 §2.4), as a list of the two."""
+    link["rel"] = ["self", rel] if active else rel
+
+
 # Single canonical label per mode — used by both build_facets and build_home_facets.
 _AVAILABILITY_MODES: list[tuple[str, str]] = [
     ("everything",     "Everything"),
@@ -1257,7 +1281,7 @@ def _build_availability_links(
 
     Each option's link narrows to that one mode; with a list applied, every
     listed mode's link is marked ``rel: "self"``, and "Everything" only when
-    none is.
+    none is. Every link carries ``REL_FACET_AVAILABILITY`` as well.
 
     Args:
         mode: Currently active mode value (e.g. ``"ebooks"``), or a list of
@@ -1282,8 +1306,9 @@ def _build_availability_links(
             "href": href_fn(val),
             "type": "application/opds+json",
         }
-        if (val == "everything" and not selected) or val in selected:
-            link["rel"] = "self"
+        active = (val == "everything" and not selected) or val in selected
+        _set_facet_rel(link, REL_FACET_AVAILABILITY, active)
+        if active:
             link.setdefault("properties", {})["active"] = True
         count = counts.get(val)
         if count is not None:
@@ -1303,7 +1328,8 @@ def _build_language_links(
     sorted alphabetically.  Falls back to a small hardcoded list if OL is down.
 
     The currently active language is indicated by ``rel: "self"`` on its link,
-    as required by the OPDS 2.0 specification.  ``language=None`` means
+    as required by the OPDS 2.0 specification, and every link carries
+    ``REL_FACET_LANGUAGE``.  ``language=None`` means
     "All Languages" (no filter); that entry is always first in the list.
 
     The links stay single-select, as OPDS facets are: each narrows to one
@@ -1339,8 +1365,8 @@ def _build_language_links(
             if n is not None and n > 0:
                 link.setdefault("properties", {})["numberOfItems"] = n
         is_active = (lang_code is None and not selected) or (lang_code is not None and selected == [lang_code])
+        _set_facet_rel(link, REL_FACET_LANGUAGE, is_active)
         if is_active:
-            link["rel"] = "self"
             link.setdefault("properties", {})["active"] = True
         links.append(link)
     return links
@@ -1370,7 +1396,8 @@ def _build_media_type_links(
     """Build the list of media type facet link dicts per OPDS 2.0 §2.4.
 
     As with availability: each link narrows to one type, and with a list
-    applied every listed type is marked ``rel: "self"``.
+    applied every listed type is marked ``rel: "self"``. Every link carries
+    ``REL_FACET_MEDIA_TYPE``.
     """
     selected = parse_media_types(media_type)
     links = []
@@ -1380,8 +1407,9 @@ def _build_media_type_links(
             "href": href_fn(mt_code),
             "type": "application/opds+json",
         }
-        if (mt_code is None and not selected) or mt_code in selected:
-            link["rel"] = "self"
+        active = (mt_code is None and not selected) or mt_code in selected
+        _set_facet_rel(link, REL_FACET_MEDIA_TYPE, active)
+        if active:
             link.setdefault("properties", {})["active"] = True
         links.append(link)
     return links
@@ -1403,6 +1431,7 @@ def _build_access_links(
 
     Two options: 'General' (default, excludes print-disabled) and 'Print Disabled'
     (shows only print-disabled content). Print-disabled is hidden by default.
+    Every link carries ``REL_FACET_ACCESS``.
     """
     active = access or "general"
     links = []
@@ -1412,8 +1441,8 @@ def _build_access_links(
             "href": href_fn(ac_code),
             "type": "application/opds+json",
         }
+        _set_facet_rel(link, REL_FACET_ACCESS, ac_code == active)
         if ac_code == active:
-            link["rel"] = "self"
             link.setdefault("properties", {})["active"] = True
         links.append(link)
     return links
@@ -1484,6 +1513,14 @@ _GROUP_DESCRIPTIONS: dict[str, str] = {
         "Stories, picture books, and non-fiction for young readers, available on "
         "Open Library."
     ),
+}
+
+
+# Relations a carousel's self link carries besides ``self``, keyed by the
+# group's title like ``_GROUP_DESCRIPTIONS``. Only the trending carousel has
+# one for now: a client finds it by relation rather than by title.
+_GROUP_RELS: dict[str, str] = {
+    "Trending Books": REL_SORT_POPULAR,
 }
 
 
@@ -2139,9 +2176,17 @@ class OpenLibraryDataProvider(DataProvider):
                     require_cover=group_require_cover,
                 )
                 desc = _GROUP_DESCRIPTIONS.get(title)
-                return Catalog.create(metadata=Metadata(title=title, description=desc), response=resp)
+                group = Catalog.create(metadata=Metadata(title=title, description=desc), response=resp)
             except Exception:
                 return None
+            # Outside the try: a slip here is a bug to surface, not a fetch
+            # failure to drop the carousel for.
+            rel = _GROUP_RELS.get(title)
+            if rel:
+                for link in group.links:
+                    if link.rel == "self":
+                        link.rel = ["self", rel]
+            return group
 
         non_empty: list[Catalog] = []
         if all_groups:

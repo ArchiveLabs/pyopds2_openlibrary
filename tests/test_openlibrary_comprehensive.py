@@ -6,11 +6,12 @@ from urllib.parse import parse_qs, urlparse
 
 import httpx
 import pytest
-from pyopds2 import DataProvider
+from pyopds2 import DataProvider, has_rel
 
 import pyopds2_openlibrary as openlibrary
 
 from pyopds2_openlibrary import (
+    REL_FACET_AVAILABILITY,
     OpenLibraryDataProvider,
     OpenLibraryDataRecord,
     _build_availability_links,
@@ -1100,12 +1101,12 @@ class TestAvailabilityFacetPrimitive:
     def test_active_mode_gets_self_rel(self):
         links = _build_availability_links(mode="ebooks", href_fn=lambda m: f"/search?mode={m}")
         ebooks = next(l for l in links if l["title"] == "Borrow")
-        assert ebooks["rel"] == "self"
+        assert has_rel(ebooks, "self")
 
-    def test_inactive_modes_have_no_rel(self):
+    def test_inactive_modes_carry_only_the_group_rel(self):
         links = _build_availability_links(mode="ebooks", href_fn=lambda m: f"/search?mode={m}")
         non_active = [l for l in links if l["title"] != "Borrow"]
-        assert all("rel" not in l for l in non_active)
+        assert all(l["rel"] == REL_FACET_AVAILABILITY for l in non_active)
 
     def test_custom_labels_applied(self):
         links = _build_availability_links(
@@ -1158,12 +1159,12 @@ class TestFacetBuilders:
         titles = [l["title"] for l in facets[2]["links"]]
         assert titles == ["All", "Books", "Audiobooks"]
         active = next(l for l in facets[2]["links"] if l["title"] == "Books")
-        assert active["rel"] == "self"
+        assert has_rel(active, "self")
 
     def test_build_facets_active_availability_has_self_rel(self):
         facets = build_facets(base_url="https://example.org/opds", query="cats", mode="open_access")
         active = next(l for l in facets[0]["links"] if l["title"] == "Open Access")
-        assert active["rel"] == "self"
+        assert has_rel(active, "self")
 
     def test_build_facets_number_of_items_and_language_param(self):
         counts = {"everything": 100, "ebooks": 80, "open_access": 30, "buyable": None}
@@ -1256,6 +1257,7 @@ class TestHomeFeed:
             def __init__(self, **kwargs):
                 self.kwargs = kwargs
                 self.publications = kwargs.get("publications", [])
+                self.links = kwargs.get("links", [])
 
             @staticmethod
             def create(*args, **kwargs):
@@ -1312,6 +1314,7 @@ class TestHomeFeed:
             def __init__(self, **kwargs):
                 self.kwargs = kwargs
                 self.publications = kwargs.get("publications", [])
+                self.links = kwargs.get("links", [])
 
             @staticmethod
             def create(*args, **kwargs):
@@ -1345,6 +1348,7 @@ class TestHomeFeed:
             def __init__(self, **kwargs):
                 self.kwargs = kwargs
                 self.publications = kwargs.get("publications", [])
+                self.links = kwargs.get("links", [])
 
             @staticmethod
             def create(*args, **kwargs):

@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 from urllib.parse import parse_qs, urlparse
 
 import pytest
-from pyopds2 import Catalog
+from pyopds2 import Catalog, has_rel
 
 import pyopds2_openlibrary as openlibrary
 from pyopds2_openlibrary import (
@@ -195,11 +195,11 @@ class TestSearch:
 class TestFacets:
     def test_nothing_ticked_marks_everything(self):
         links = _build_availability_links(mode="everything", href_fn=lambda m: m)
-        assert [l["title"] for l in links if l.get("rel") == "self"] == ["Everything"]
+        assert [l["title"] for l in links if has_rel(l, "self")] == ["Everything"]
 
     def test_every_listed_mode_is_marked(self):
         links = _build_availability_links(mode="ebooks,open_access", href_fn=lambda m: m)
-        assert sorted(l["title"] for l in links if l.get("rel") == "self") == ["Borrow", "Open Access"]
+        assert sorted(l["title"] for l in links if has_rel(l, "self")) == ["Borrow", "Open Access"]
 
     def test_each_option_still_narrows_to_one_mode(self):
         links = _build_availability_links(mode="ebooks,open_access", href_fn=lambda m: f"?mode={m}")
@@ -215,7 +215,7 @@ class TestFacets:
 
     def test_every_listed_media_type_is_marked(self):
         links = _build_media_type_links(media_type="ebook,audiobook", href_fn=lambda m: str(m))
-        assert [l["title"] for l in links if l.get("rel") == "self"] == ["Books", "Audiobooks"]
+        assert [l["title"] for l in links if has_rel(l, "self")] == ["Books", "Audiobooks"]
 
     def test_search_facets_spell_the_lists_canonically(self):
         facets = OpenLibraryDataProvider.build_facets(
