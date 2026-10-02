@@ -19,6 +19,7 @@ from pyopds2_openlibrary import (
     REL_FACET_AVAILABILITY,
     REL_FACET_LANGUAGE,
     REL_FACET_MEDIA_TYPE,
+    REL_PORTRAIT,
     REL_SORT_POPULAR,
     _build_access_links,
     _build_availability_links,
@@ -138,3 +139,20 @@ class TestCarouselRels:
 
     def test_sort_popular_is_the_registered_opds_relation(self):
         assert REL_SORT_POPULAR == "http://opds-spec.org/sort/popular"
+
+
+class TestAuthorPageRels:
+    def test_both_contributor_links_refer_to_the_author(self):
+        [author] = _record("Book").metadata().author
+        assert all(has_rel(link, "author") for link in author.links)
+        assert {link.type for link in author.links} == {"text/html", "application/opds+json"}
+
+    def test_the_portrait_relation_is_a_fixed_url_under_the_rel_path(self):
+        assert REL_PORTRAIT == "https://openlibrary.org/opds/rel/portrait"
+
+    def test_author_facet_links_keep_the_sort(self):
+        with patch("pyopds2_openlibrary.fetch_language_options", return_value=OPTIONS):
+            groups = OpenLibraryDataProvider.build_author_facets(base_url="https://x/opds", olid="OL1A", sort="rating")
+            plain = OpenLibraryDataProvider.build_author_facets(base_url="https://x/opds", olid="OL1A")
+        assert all("sort=rating" in l["href"] for g in groups for l in g["links"])
+        assert not any("sort=" in l["href"] for g in plain for l in g["links"])

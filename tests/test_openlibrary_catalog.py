@@ -294,6 +294,8 @@ class TestOpenLibraryDataRecord:
             assert metadata.author[0].links[0].href == "https://openlibrary.org/authors/OL12345A"
             assert metadata.author[0].links[1].href == "https://example.org/opds/authors/OL12345A"
             assert metadata.author[0].links[1].type == "application/opds+json"
+            # Both refer to the author; the type tells them apart.
+            assert [l.rel for l in metadata.author[0].links] == ["author", "author"]
         finally:
             OpenLibraryDataProvider.OPDS_BASE_URL = original
 
