@@ -369,6 +369,7 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
                             Link(
                                 href=f"{opds_base}/authors/{key}",
                                 type="application/opds+json",
+                                rel="author",
                             ),
                         ],
                     )
@@ -657,11 +658,47 @@ def _latin_name_for_author(olid: str, current_name: str) -> str:
     return current_name
 
 
-def fetch_author_bio(olid: str) -> tuple[Optional[str], Optional[str]]:
-    """Fetch author name and bio from the OpenLibrary author API.
+class AuthorInfo(typing.NamedTuple):
+    """What the author page needs from ``/authors/<olid>.json``.
 
-    Returns ``(name, bio)`` where bio has been stripped of Markdown/HTML.
-    Returns ``(None, None)`` on any failure — never raises.
+    ``photo_width``/``photo_height`` are the pixel size of the ``-L``
+    rendition at ``https://covers.openlibrary.org/a/id/<photo_id>-L.jpg``,
+    or ``None`` when unknown.
+    """
+    name: Optional[str]
+    bio: Optional[str]
+    photo_id: Optional[int]
+    photo_width: Optional[int]
+    photo_height: Optional[int]
+
+
+_NO_AUTHOR_INFO = AuthorInfo(None, None, None, None, None)
+
+
+def _first_photo_id(photos: object) -> Optional[int]:
+    """First usable id in an author record's ``photos``; ``-1`` means none."""
+    if not isinstance(photos, list):
+        return None
+    return next((p for p in photos if isinstance(p, int) and p > 0), None)
+
+
+def _fetch_photo_size(photo_id: int) -> Optional[tuple[int, int]]:
+    """Pixel size of the ``-L`` rendition of author photo *photo_id*.
+
+    The covers server reports the original's size; the ``-L`` file is that
+    scaled into the same box as book covers, so ``_fit_cover_size`` gives
+    the exact size of the linked file. ``None`` when the size is unknown.
+    """
+    data = _get(f"https://covers.openlibrary.org/a/id/{photo_id}.json").json()
+    return _fit_cover_size(data.get("width"), data.get("height"))
+
+
+def fetch_author_info(olid: str) -> AuthorInfo:
+    """Fetch name, bio and photo of an author from the OpenLibrary author API.
+
+    The bio has been stripped of Markdown/HTML. A failure to size the photo
+    only drops the size; any other failure returns an all-``None``
+    ``AuthorInfo``. Never raises.
     """
     try:
         r = _get(f"{OpenLibraryDataProvider.BASE_URL}/authors/{olid}.json")
@@ -679,9 +716,48 @@ def fetch_author_bio(olid: str) -> tuple[Optional[str], Optional[str]]:
         if isinstance(raw_bio, dict):
             raw_bio = raw_bio.get("value")
         bio: Optional[str] = strip_markdown(raw_bio) if raw_bio else None
-        return name, bio
+        photo_id = _first_photo_id(data.get("photos"))
     except Exception:
-        return None, None
+        return _NO_AUTHOR_INFO
+    size: Optional[tuple[int, int]] = None
+    if photo_id:
+        try:
+            size = _fetch_photo_size(photo_id)
+        except Exception:
+            size = None
+    width, height = size if size else (None, None)
+    return AuthorInfo(name, bio, photo_id, width, height)
+
+
+def fetch_author_bio(olid: str) -> tuple[Optional[str], Optional[str]]:
+    """Fetch author name and bio from the OpenLibrary author API.
+
+    Returns ``(name, bio)`` where bio has been stripped of Markdown/HTML.
+    Returns ``(None, None)`` on any failure — never raises.
+    """
+    info = fetch_author_info(olid)
+    return info.name, info.bio
+
+
+def author_photo_links(info: AuthorInfo) -> Optional[List[Link]]:
+    """The author page's ``images`` collection: the ``-L`` photo, carrying
+    ``REL_PORTRAIT`` and, when known, the size of that exact file. ``None``
+    when the author has no photo.
+    """
+    if not info.photo_id:
+        return None
+    dimensions = (
+        {"width": info.photo_width, "height": info.photo_height}
+        if info.photo_width and info.photo_height else {}
+    )
+    return [
+        Link(
+            href=f"https://covers.openlibrary.org/a/id/{info.photo_id}-L.jpg",
+            type="image/jpeg",
+            rel=REL_PORTRAIT,
+            **dimensions,
+        ),
+    ]
 
 
 def marc_language_to_iso_639_1(marc_code: str) -> Optional[str]:
@@ -1235,8 +1311,12 @@ REL_FACET_AVAILABILITY: str = "https://openlibrary.org/opds/rel/facet/availabili
 REL_FACET_LANGUAGE: str = "https://openlibrary.org/opds/rel/facet/language"
 REL_FACET_MEDIA_TYPE: str = "https://openlibrary.org/opds/rel/facet/media-type"
 REL_FACET_ACCESS: str = "https://openlibrary.org/opds/rel/facet/access"
-# The trending carousel's self link also carries this registered relation.
+# The trending carousel's self link also carries this registered relation,
+# as does the Popular Books carousel on an author page.
 REL_SORT_POPULAR: str = "http://opds-spec.org/sort/popular"
+# A feed-level ``images`` entry that pictures the person the feed is about:
+# the author's photo on ``/authors/<olid>``.
+REL_PORTRAIT: str = "https://openlibrary.org/opds/rel/portrait"
 
 
 def _set_facet_rel(link: dict, rel: str, active: bool) -> None:
@@ -1907,12 +1987,13 @@ class OpenLibraryDataProvider(DataProvider):
         page: int = 1,
         limit: int = 25,
         access: Optional[str] = None,
+        sort: Optional[str] = None,
     ) -> list[dict]:
         """Build Availability, Language, and Media Type facet groups for an author catalog page.
 
         Links point to ``<base_url>/authors/<olid>?mode=<value>&...``, preserving
-        the current page, limit, language, and media_type selections when switching
-        between facets.
+        the current page, limit, language, media_type and sort selections when
+        switching between facets.
         """
         language = canonical_language(language)
         mode = canonical_mode(mode)
@@ -1937,6 +2018,8 @@ class OpenLibraryDataProvider(DataProvider):
                 params["media_type"] = mt_val
             if ac_val and ac_val != "general":
                 params["access"] = ac_val
+            if sort:
+                params["sort"] = sort
             return f"{base_url}/authors/{olid}?{urlencode(params)}" if params else f"{base_url}/authors/{olid}"
 
         return [
