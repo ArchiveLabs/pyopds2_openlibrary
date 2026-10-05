@@ -1988,16 +1988,21 @@ class OpenLibraryDataProvider(DataProvider):
         limit: int = 25,
         access: Optional[str] = None,
         sort: Optional[str] = None,
+        path: Optional[str] = None,
     ) -> list[dict]:
         """Build Availability, Language, and Media Type facet groups for an author catalog page.
 
-        Links point to ``<base_url>/authors/<olid>?mode=<value>&...``, preserving
-        the current page, limit, language, media_type and sort selections when
-        switching between facets.
+        Links point to ``<base_url><path>?mode=<value>&...``, preserving the
+        current page, limit, language, media_type and sort selections when
+        switching between facets. *path* is the feed's path under
+        *base_url*, ``/authors/<olid>`` unless given (a service that lists an
+        author's books at ``/authors/<olid>/books`` passes that).
         """
         language = canonical_language(language)
         mode = canonical_mode(mode)
         media_type = canonical_media_type(media_type)
+        if path is None:
+            path = f"/authors/{olid}"
 
         def author_href(
             mode_val: str = mode,
@@ -2020,7 +2025,7 @@ class OpenLibraryDataProvider(DataProvider):
                 params["access"] = ac_val
             if sort:
                 params["sort"] = sort
-            return f"{base_url}/authors/{olid}?{urlencode(params)}" if params else f"{base_url}/authors/{olid}"
+            return f"{base_url}{path}?{urlencode(params)}" if params else f"{base_url}{path}"
 
         return [
             {
