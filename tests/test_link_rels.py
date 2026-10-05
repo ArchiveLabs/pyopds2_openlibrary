@@ -156,3 +156,10 @@ class TestAuthorPageRels:
             plain = OpenLibraryDataProvider.build_author_facets(base_url="https://x/opds", olid="OL1A")
         assert all("sort=rating" in l["href"] for g in groups for l in g["links"])
         assert not any("sort=" in l["href"] for g in plain for l in g["links"])
+
+    def test_author_facet_links_take_the_feeds_path(self):
+        with patch("pyopds2_openlibrary.fetch_language_options", return_value=OPTIONS):
+            default = OpenLibraryDataProvider.build_author_facets(base_url="https://x/opds", olid="OL1A")
+            books = OpenLibraryDataProvider.build_author_facets(base_url="https://x/opds", olid="OL1A", path="/authors/OL1A/books")
+        assert all(l["href"].split("?")[0] == "https://x/opds/authors/OL1A" for g in default for l in g["links"])
+        assert all(l["href"].split("?")[0] == "https://x/opds/authors/OL1A/books" for g in books for l in g["links"])
