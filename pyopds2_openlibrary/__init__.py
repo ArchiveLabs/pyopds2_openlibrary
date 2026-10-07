@@ -274,6 +274,10 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
     )
     number_of_pages_median: Optional[int] = None
     id_librivox: Optional[list[str]] = None
+    # The ``language`` the search that found this record was made with, so a
+    # work's self link can echo it: the editions a work lists depend on it.
+    # Not a Solr field, never serialised.
+    request_language: Optional[str] = Field(None, exclude=True)
 
     @property
     def type(self) -> str:
@@ -369,32 +373,66 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
             ),
         ]
 
-    def metadata(self) -> Metadata:
-        """Return this record as OPDS Metadata."""
-        def get_authors() -> Optional[List[Contributor]]:
-            if self.author_name and self.author_key:
-                opds_base = OpenLibraryDataProvider.OPDS_BASE_URL or OpenLibraryDataProvider.BASE_URL
-                return [
-                    Contributor(
-                        name=name,
-                        links=[
-                            Link(
-                                href=f"{OpenLibraryDataProvider.BASE_URL}/authors/{key}",
-                                type="text/html",
-                                rel="author",
-                            ),
-                            Link(
-                                href=f"{opds_base}/authors/{key}",
-                                type="application/opds+json",
-                                rel="author",
-                            ),
-                        ],
-                    )
-                    for name, key in zip(self.author_name, self.author_key)
-                ]
-            if self.author_name:
-                return [Contributor(name=name) for name in self.author_name]
+    def _authors(self) -> Optional[List[Contributor]]:
+        if self.author_name and self.author_key:
+            opds_base = OpenLibraryDataProvider.OPDS_BASE_URL or OpenLibraryDataProvider.BASE_URL
+            return [
+                Contributor(
+                    name=name,
+                    links=[
+                        Link(
+                            href=f"{OpenLibraryDataProvider.BASE_URL}/authors/{key}",
+                            type="text/html",
+                            rel="author",
+                        ),
+                        Link(
+                            href=f"{opds_base}/authors/{key}",
+                            type="application/opds+json",
+                            rel="author",
+                        ),
+                    ],
+                )
+                for name, key in zip(self.author_name, self.author_key)
+            ]
+        if self.author_name:
+            return [Contributor(name=name) for name in self.author_name]
+        return None
 
+    def _aggregate_rating(self) -> Optional[dict]:
+        # Ratings are work-level in OL — read from ``self`` (the work), never
+        # the surfaced edition. Omit entirely for unrated works so consumers
+        # don't see a meaningless ``ratingValue: 0``. schema.org/AggregateRating
+        # (OL uses a 1–5 scale).
+        if self.ratings_count and self.ratings_average:
+            return {
+                "@type": "AggregateRating",
+                "ratingValue": round(self.ratings_average, 2),
+                "ratingCount": self.ratings_count,
+                "bestRating": 5,
+                "worstRating": 1,
+            }
+        return None
+
+    def _subjects(self) -> Optional[List[Subject]]:
+        # Subjects are work-level. Emit at most 10 as navigable OPDS subject
+        # objects whose link browses the app's /search by subject name. Embedded
+        # double-quotes are stripped so the Solr quoted clause can't break; the
+        # name keeps its original text. Omit entirely for works with no subjects.
+        # Colon-separated subjects (e.g. ``content_warning:cover``) are machine
+        # tags, not human-readable, so they are filtered out before slicing.
+        if not self.subject:
+            return None
+        opds_base = OpenLibraryDataProvider.OPDS_BASE_URL or f"{OpenLibraryDataProvider.BASE_URL}/opds"
+        subjects = []
+        human_readable = [name for name in self.subject if ":" not in name]
+        for name in human_readable[:10]:
+            query = f'subject:"{name.replace(chr(34), "")}"'
+            href = f"{opds_base}/search?" + urlencode({"query": query, "title": name})
+            subjects.append(Subject(name=name, links=[Link(type="application/opds+json", href=href)]))
+        return subjects or None
+
+    def metadata(self) -> Metadata:
+        """This record as the metadata of its surfaced edition."""
         edition = self.editions.docs[0] if self.editions and self.editions.docs else None
         book = edition or self
 
@@ -404,49 +442,115 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
             if "eng" in langs:
                 desc = self.description
 
-        # Ratings are work-level in OL — read from ``self`` (the work), never
-        # the surfaced edition. Omit entirely for unrated works so consumers
-        # don't see a meaningless ``ratingValue: 0``. schema.org/AggregateRating
-        # (OL uses a 1–5 scale).
-        aggregate_rating = None
-        if self.ratings_count and self.ratings_average:
-            aggregate_rating = {
-                "@type": "AggregateRating",
-                "ratingValue": round(self.ratings_average, 2),
-                "ratingCount": self.ratings_count,
-                "bestRating": 5,
-                "worstRating": 1,
-            }
-
-        # Subjects are work-level. Emit at most 10 as navigable OPDS subject
-        # objects whose link browses the app's /search by subject name. Embedded
-        # double-quotes are stripped so the Solr quoted clause can't break; the
-        # name keeps its original text. Omit entirely for works with no subjects.
-        # Colon-separated subjects (e.g. ``content_warning:cover``) are machine
-        # tags, not human-readable, so they are filtered out before slicing.
-        subjects = None
-        if self.subject:
-            opds_base = OpenLibraryDataProvider.OPDS_BASE_URL or f"{OpenLibraryDataProvider.BASE_URL}/opds"
-            subjects = []
-            human_readable = [name for name in self.subject if ":" not in name]
-            for name in human_readable[:10]:
-                query = f'subject:"{name.replace(chr(34), "")}"'
-                href = f"{opds_base}/search?" + urlencode({"query": query, "title": name})
-                subjects.append(Subject(name=name, links=[Link(type="application/opds+json", href=href)]))
-            subjects = subjects or None
-
         return Metadata(
             type=self.type,
             title=book.title or self.title or "Untitled",
             subtitle=book.subtitle,
-            author=get_authors(),
+            author=self._authors(),
             description=strip_markdown(desc) if desc else None,
             language=[lang for marc_lang in (book.language or []) if (lang := marc_language_to_iso_639_1(marc_lang))],
+            published=edition_published(edition) if edition else None,
             # TODO: Use the edition-specific pagecount
             numberOfPages=self.number_of_pages_median,
-            aggregateRating=aggregate_rating,
-            subject=subjects,
+            aggregateRating=self._aggregate_rating(),
+            subject=self._subjects(),
         )
+
+    # -- The work, and the editions it lists ---------------------------------
+
+    def to_edition_publication(self) -> Publication:
+        """The surfaced edition as a publication of its own: the document at
+        ``/books/OL…M``, terminal — its own metadata, cover and acquisition
+        links, and the Archive's document as its one alternate when the
+        Archive holds it."""
+        return Publication(metadata=self.metadata(), links=self.links(), images=self.images())
+
+    def to_publication(self) -> Publication:
+        """A record in a feed is a work (see ``to_work_publication``)."""
+        return self.to_work_publication()
+
+    def work_olid(self) -> str:
+        return (self.key or "").split("/")[-1]
+
+    def work_self_href(self, language: Optional[str] = None) -> str:
+        """``…/opds/works/OL…W``, with the request's ``language`` echoed: the
+        editions listed depend on it, so it names the document."""
+        opds_base = OpenLibraryDataProvider.OPDS_BASE_URL or f"{OpenLibraryDataProvider.BASE_URL}/opds"
+        href = f"{opds_base}/works/{self.work_olid()}"
+        return f"{href}?language={language}" if language else href
+
+    def work_metadata(self, editions: list["OpenLibraryDataRecord.EditionDoc"]) -> Metadata:
+        """The work's own words, with what a card needs from its editions:
+        the first edition's type, and the languages of the editions listed."""
+        languages: list[str] = []
+        for edition in editions:
+            for marc in edition.language or []:
+                iso = marc_language_to_iso_639_1(marc)
+                if iso and iso not in languages:
+                    languages.append(iso)
+        if not languages:
+            languages = [iso for marc in (self.language or []) if (iso := marc_language_to_iso_639_1(marc))]
+
+        # The first edition's description if it has one, else the work's —
+        # under the same guard as an edition: only when English is among the
+        # languages on the page, so a French edition is not described in English.
+        desc = editions[0].description if editions else None
+        if not desc and self.description and (not languages or "en" in languages):
+            desc = self.description
+
+        first = editions[0] if editions else None
+        return Metadata(
+            type=edition_type(first) if first else self.type,
+            title=self.title or "Untitled",
+            subtitle=self.subtitle,
+            author=self._authors(),
+            description=strip_markdown(desc) if desc else None,
+            language=languages or None,
+            numberOfPages=self.number_of_pages_median,
+            aggregateRating=self._aggregate_rating(),
+            subject=self._subjects(),
+        )
+
+    def to_work_publication(
+        self,
+        editions: Optional[list["OpenLibraryDataRecord.EditionDoc"]] = None,
+        language: Optional[str] = None,
+    ) -> Publication:
+        """This work as an OPDS publication whose ``rel=alternate`` links of
+        the publication type are its editions, best offer first.
+
+        *editions* defaults to the ones Solr surfaced on this record (a feed's
+        one), ranked; the work route passes the composed list. *language*
+        defaults to the one the search was made with.
+        """
+        if editions is None:
+            editions = rank_editions(list(self.editions.docs)) if self.editions and self.editions.docs else []
+        if language is None:
+            language = self.request_language
+        links: list[Link] = [
+            Link(rel="self", href=self.work_self_href(language), type=PUBLICATION_TYPE),
+            Link(rel="alternate", href=f"{OpenLibraryDataProvider.BASE_URL}{self.key}", type="text/html"),
+            Link(rel="alternate", href=f"{OpenLibraryDataProvider.BASE_URL}{self.key}.json", type="application/json"),
+        ]
+        for edition in editions:
+            link = edition_alternate_link(edition, self.author_name)
+            if link is not None:
+                links.append(link)
+        return Publication(
+            metadata=self.work_metadata(editions),
+            links=links,
+            images=self._work_images(editions),
+        )
+
+    def _work_images(self, editions: list["OpenLibraryDataRecord.EditionDoc"]) -> Optional[List[Link]]:
+        """The cover of the first edition that has one, else the work's."""
+        for book in [*editions, self]:
+            if book.cover_i:
+                size = _fit_cover_size(book.cover_width, book.cover_height)
+                dimensions = {"width": size[0], "height": size[1]} if size else {}
+                return [Link(href=f"https://covers.openlibrary.org/b/id/{book.cover_i}-L.jpg", type="image/jpeg", rel="cover", **dimensions)]
+        return None
+
 
 class OpenLibraryLanguageStub(TypedDict):
     key: str
@@ -473,19 +577,23 @@ def _build_ia_alternate_link(edition: OpenLibraryDataRecord.EditionDoc) -> Link:
     """
     if not edition.ia:
         raise ValueError("edition.ia must be non-empty to build an IA alternate link")
-    identifier = edition.ia[0]
     return Link(
         title="Internet Archive",
-        href=f"https://archive.org/services/loans/loan/?action=webpub&identifier={identifier}&opds=1",
+        href=_ia_webpub_href(edition.ia[0]),
         rel="alternate",
-        type="application/opds-publication+json",
-        properties={
-            "authenticate": {
-                "href": "https://archive.org/services/loans/loan/?action=authentication_document",
-                "type": "application/opds-authentication+json",
-            }
-        },
+        type=PUBLICATION_TYPE,
+        properties={"authenticate": dict(_IA_AUTHENTICATE)},
     )
+
+
+def _ia_webpub_href(identifier: str) -> str:
+    return f"https://archive.org/services/loans/loan/?action=webpub&identifier={identifier}&opds=1"
+
+
+_IA_AUTHENTICATE = {
+    "href": "https://archive.org/services/loans/loan/?action=authentication_document",
+    "type": "application/opds-authentication+json",
+}
 
 
 def _build_external_acquisition_link(
@@ -599,6 +707,282 @@ def map_ol_format_to_mime(ol_format: Literal['web', 'pdf', 'epub', 'audio', 'dai
         'txt': 'text/plain',
     }
     return mapping.get(ol_format, 'application/octet-stream')
+
+
+# ---------------------------------------------------------------------------
+# The editions of a work
+# ---------------------------------------------------------------------------
+#
+# A work is an OPDS publication whose ``rel="alternate"`` links of type
+# ``application/opds-publication+json`` are its editions, one per edition,
+# best offer first. Each points straight at the document that serves the
+# edition — the Internet Archive's webpub for a printing the Archive holds,
+# the edition document here otherwise — and carries a hint of what it points
+# at under ``properties.edition``, so a client draws the list without
+# fetching any of them. The hint is a summary; the document is the truth.
+#
+# Open Library's search answers one edition per work per call, so a work's
+# list is composed: one call per (language, access tier), each asking for
+# the best edition under that pair. The tier clause in ``q`` is what keeps
+# an edition with no usable offer out of the list; there is no post-filter.
+
+_OPDS_ACQUISITION = "http://opds-spec.org/acquisition"
+REL_OPEN_ACCESS = f"{_OPDS_ACQUISITION}/open-access"
+REL_BORROW = f"{_OPDS_ACQUISITION}/borrow"
+REL_BUY = f"{_OPDS_ACQUISITION}/buy"
+PUBLICATION_TYPE = "application/opds-publication+json"
+_AUDIOBOOK_TYPES = ("application/audiobook+json",)
+
+# The box the covers server scales its ``-M`` rendition into
+# (``image_sizes["M"]`` in openlibrary/coverstore/config.py).
+_COVER_M_BOX = (180, 360)
+
+# How a provider is named to a reader. Anything not listed is its
+# ``provider_name`` with the underscores as spaces, capitalised.
+_DISTRIBUTOR_NAMES = {
+    "ia": "Internet Archive",
+    "standard_ebooks": "Standard Ebooks",
+    "gutenberg": "Project Gutenberg",
+    "project_gutenberg": "Project Gutenberg",
+    "librivox": "LibriVox",
+    "bwb": "Better World Books",
+    "better_world_books": "Better World Books",
+}
+
+# The access tiers an edition is asked for, best first. Print-disabled
+# printings are asked for only under ``access=print_disabled``, as /books
+# serves them.
+_EDITION_TIERS = ("public", "borrowable")
+
+
+class EditionOffer(typing.NamedTuple):
+    """The one offer an edition is listed for: its relation, who makes it,
+    its price if it has one, and the loan state if it is a loan."""
+    rel: str
+    provider_name: Optional[str]
+    price: Optional[dict]
+    availability: Optional[str]
+
+
+def distributor_name(provider_name: Optional[str]) -> Optional[str]:
+    if not provider_name:
+        return None
+    return _DISTRIBUTOR_NAMES.get(provider_name) or provider_name.replace("_", " ").title()
+
+
+def _availability_state(edition: OpenLibraryDataRecord.EditionDoc) -> Optional[str]:
+    status = edition.availability.status if edition.availability else None
+    if status in ("open", "borrow_available"):
+        return "available"
+    if status in ("borrow_unavailable", "private", "error"):
+        return "unavailable"
+    return None
+
+
+def _price_in(properties: Optional[dict]) -> Optional[dict]:
+    price = (properties or {}).get("price")
+    if isinstance(price, dict) and isinstance(price.get("value"), (int, float)) and price.get("currency"):
+        return {"value": price["value"], "currency": price["currency"]}
+    return None
+
+
+def offer_rank(rel: str, availability: Optional[str], price: Optional[dict]) -> tuple[int, float]:
+    """Where an offer sorts: free, then a loan that can be taken now, then a
+    loan whose state is unknown, then one that is checked out, then for sale
+    cheapest first, then anything else."""
+    if rel == REL_OPEN_ACCESS:
+        return (0, 0.0)
+    if rel == REL_BORROW:
+        return ({"available": 1, None: 2, "unavailable": 3}[availability], 0.0)
+    if rel == REL_BUY:
+        return (4, float(price["value"]) if price else float("inf"))
+    return (5, 0.0)
+
+
+def edition_offer(edition: OpenLibraryDataRecord.EditionDoc) -> Optional[EditionOffer]:
+    """The best offer an edition has, or None when it has none to list.
+
+    Open Library's own ``opds_acquisitions`` first; a printing the Archive
+    holds that came without them is still an Archive offer; and an older
+    record with only ``providers`` is read through the same converter the
+    edition document uses.
+    """
+    state = _availability_state(edition)
+    candidates: list[EditionOffer] = []
+    for row in edition.opds_acquisitions or []:
+        if row.rel in (REL_OPEN_ACCESS, REL_BORROW, REL_BUY):
+            candidates.append(EditionOffer(
+                row.rel, row.provider_name, _price_in(row.properties),
+                state if row.rel == REL_BORROW else None,
+            ))
+    if not candidates and edition.ia and edition.ebook_access in ("public", "borrowable", "printdisabled"):
+        rel = REL_OPEN_ACCESS if edition.ebook_access == "public" else REL_BORROW
+        candidates.append(EditionOffer(rel, "ia", None, state if rel == REL_BORROW else None))
+    if not candidates:
+        for provider in edition.providers or []:
+            if not provider.url:
+                continue
+            for link in ol_acquisition_to_opds_links(edition, provider):
+                if link.rel in (REL_OPEN_ACCESS, REL_BORROW, REL_BUY):
+                    candidates.append(EditionOffer(
+                        cast(str, link.rel), provider.provider_name, _price_in(link.properties),
+                        state if link.rel == REL_BORROW else None,
+                    ))
+    if not candidates:
+        return None
+    return min(candidates, key=lambda o: offer_rank(o.rel, o.availability, o.price))
+
+
+def edition_type(edition: OpenLibraryDataRecord.EditionDoc) -> str:
+    """schema.org Audiobook when any of the edition's offers is audio, else Book."""
+    for row in edition.opds_acquisitions or []:
+        if row.type and (row.type.startswith("audio/") or row.type in _AUDIOBOOK_TYPES):
+            return "http://schema.org/Audiobook"
+    if any(p.format == "audio" for p in edition.providers or []):
+        return "http://schema.org/Audiobook"
+    return "http://schema.org/Book"
+
+
+def edition_published(edition: OpenLibraryDataRecord.EditionDoc) -> Optional[str]:
+    """The earliest year the printing says, as an ISO date: ``2010-01-01``."""
+    years = [y for y in (edition.publish_year or []) if isinstance(y, int) and y > 0]
+    return f"{min(years):04d}-01-01" if years else None
+
+
+def _edition_cover(edition: OpenLibraryDataRecord.EditionDoc) -> Optional[dict]:
+    if not edition.cover_i:
+        return None
+    cover: dict = {"href": f"https://covers.openlibrary.org/b/id/{edition.cover_i}-M.jpg", "type": "image/jpeg"}
+    size = _fit_cover_size(edition.cover_width, edition.cover_height, _COVER_M_BOX)
+    if size:
+        cover["width"], cover["height"] = size
+    return cover
+
+
+def edition_hint(
+    edition: OpenLibraryDataRecord.EditionDoc,
+    author_names: Optional[list[str]],
+    offer: EditionOffer,
+) -> dict:
+    """What a client needs to draw the edition's row without fetching it."""
+    hint: dict = {
+        "key": (edition.key or "").split("/")[-1] or None,
+        "@type": edition_type(edition),
+        "author": list(author_names) if author_names else None,
+        "published": edition_published(edition),
+        "language": [iso for marc in (edition.language or []) if (iso := marc_language_to_iso_639_1(marc))] or None,
+        "cover": _edition_cover(edition),
+        "distributor": distributor_name(offer.provider_name),
+        "offer": {
+            "rel": offer.rel,
+            **({"price": offer.price} if offer.price else {}),
+            **({"availability": {"state": offer.availability}} if offer.availability else {}),
+        },
+    }
+    return {k: v for k, v in hint.items() if v is not None}
+
+
+def edition_target(edition: OpenLibraryDataRecord.EditionDoc, offer: EditionOffer) -> str:
+    """Where the edition's alternate points: the Archive's document for a
+    printing the Archive serves, else the edition document here."""
+    if edition.ia and offer.provider_name == "ia":
+        return _ia_webpub_href(edition.ia[0])
+    opds_base = OpenLibraryDataProvider.OPDS_BASE_URL or f"{OpenLibraryDataProvider.BASE_URL}/opds"
+    return f"{opds_base}{edition.key}"
+
+
+def edition_alternate_link(
+    edition: OpenLibraryDataRecord.EditionDoc,
+    author_names: Optional[list[str]] = None,
+) -> Optional[Link]:
+    """The edition as one ``rel=alternate`` link on its work, or None when
+    it has no offer to list (nothing to point at)."""
+    offer = edition_offer(edition)
+    if offer is None or not edition.key:
+        return None
+    href = edition_target(edition, offer)
+    properties: dict = {}
+    if href.startswith("https://archive.org/"):
+        properties["authenticate"] = dict(_IA_AUTHENTICATE)
+    properties["edition"] = edition_hint(edition, author_names, offer)
+    return Link(rel="alternate", type=PUBLICATION_TYPE, href=href, title=edition.title, properties=properties)
+
+
+def rank_editions(
+    editions: list[OpenLibraryDataRecord.EditionDoc],
+) -> list[OpenLibraryDataRecord.EditionDoc]:
+    """One of each edition, best offer first (``offer_rank``), the given
+    order kept within a rank; an edition with nothing to offer is left out
+    because there is no link to make for it."""
+    seen: set[str] = set()
+    ranked: list[tuple[OpenLibraryDataRecord.EditionDoc, EditionOffer]] = []
+    for edition in editions:
+        if not edition.key or edition.key in seen:
+            continue
+        seen.add(edition.key)
+        offer = edition_offer(edition)
+        if offer is not None:
+            ranked.append((edition, offer))
+    ranked.sort(key=lambda pair: offer_rank(pair[1].rel, pair[1].availability, pair[1].price))
+    return [edition for edition, _ in ranked]
+
+
+def _edition_queries(
+    work_olid: str,
+    language: Optional[str],
+    access: Optional[str],
+) -> list[tuple[str, Optional[str]]]:
+    """The ``(q, lang)`` of each one-edition call, tiers outer, the reader's
+    languages inner, so the composed list is already in rank order within a
+    tier."""
+    tiers = ("printdisabled",) if access == "print_disabled" else _EDITION_TIERS
+    pairs = [(iso, iso_639_1_to_marc(iso)) for iso in parse_languages(canonical_language(language))]
+    pairs = [(iso, marc) for iso, marc in pairs if marc] or [(None, None)]
+    queries: list[tuple[str, Optional[str]]] = []
+    for tier in tiers:
+        for iso, marc in pairs:
+            q = f"key:/works/{work_olid} ebook_access:{tier}"
+            if marc:
+                q = f"{q} language:{marc}"
+            queries.append((q, iso))
+    return queries
+
+
+def _edition_for_query(q: str, iso_lang: Optional[str]) -> Optional[OpenLibraryDataRecord.EditionDoc]:
+    r = _get(
+        f"{OpenLibraryDataProvider.BASE_URL}/search.json",
+        params={
+            "q": q,
+            "editions": "true",
+            "limit": 1,
+            "fields": "key,editions," + ",".join(_EDITION_RESOLVE_FIELDS),
+            **({"lang": iso_lang} if iso_lang else {}),
+        },
+    )
+    docs = r.json().get("docs", [])
+    edition_docs = docs[0].get("editions", {}).get("docs", []) if docs else []
+    if not edition_docs:
+        return None
+    return OpenLibraryDataRecord.EditionDoc.model_validate(edition_docs[0])
+
+
+def editions_of_work(
+    work_olid: str,
+    language: Optional[str] = None,
+    access: Optional[str] = None,
+) -> list[OpenLibraryDataRecord.EditionDoc]:
+    """The editions a work lists for a reader: the best edition under each
+    (language, access tier), composed from one call each and ranked.
+
+    A call that fails raises; a work page with a silently shorter list would
+    read as the catalogue's answer.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    queries = _edition_queries(work_olid, language, access)
+    with ThreadPoolExecutor(max_workers=min(len(queries), 6)) as pool:
+        found = list(pool.map(lambda pair: _edition_for_query(*pair), queries))
+    return rank_editions([edition for edition in found if edition is not None])
 
 
 class _HTMLStripper(_HTMLParser):
@@ -1014,6 +1398,36 @@ def _has_acquisition_options(record: OpenLibraryDataRecord) -> bool:
         if p.format == "web" and p.access == "buy":
             return True
     return False
+
+
+def _resolve_latin_author_names(records: list[OpenLibraryDataRecord]) -> None:
+    """Resolve non-Latin author names (e.g. Cyrillic) to their Latin personal_name.
+
+    OL's search index stores author_name from the author record's `name` field,
+    which for authors like Chekhov is in their native script. We fetch the author
+    record once (cached) and use personal_name when it is Latin-script.
+    """
+    olid_to_nonlatin: dict[str, str] = {}  # olid -> first non-Latin name seen
+    for r in records:
+        if r.author_name and r.author_key:
+            for name, key in zip(r.author_name, r.author_key):
+                if not _is_latin_name(name) and key not in _latin_author_cache and key not in olid_to_nonlatin:
+                    olid_to_nonlatin[key] = name
+    if olid_to_nonlatin:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        with ThreadPoolExecutor(max_workers=min(len(olid_to_nonlatin), 4)) as pool:
+            futures = {pool.submit(_latin_name_for_author, olid, name): olid for olid, name in olid_to_nonlatin.items()}
+            for future in as_completed(futures):
+                future.result()
+    for record in records:
+        if record.author_name and record.author_key:
+            resolved = [
+                (_latin_author_cache.get(key) or name) if not _is_latin_name(name) else name
+                for name, key in zip(record.author_name, record.author_key)
+            ]
+            # Preserve any trailing names that have no corresponding author_key entry.
+            resolved.extend(record.author_name[len(resolved):])
+            record.author_name = resolved
 
 
 def _has_cover(record: OpenLibraryDataRecord) -> bool:
@@ -1620,6 +2034,18 @@ _GROUP_DESCRIPTIONS: dict[str, str] = {
 _GROUP_RELS: dict[str, str] = {
     "Trending Books": REL_SORT_POPULAR,
 }
+
+
+# What every search asks Solr for, work and edition alike.
+_SEARCH_FIELDS = [
+    "key", "title", "editions", "description", "providers", "author_name", "ia",
+    "cover_i", "cover_width", "cover_height", "availability", "ebook_access",
+    "author_key", "subtitle", "language", "number_of_pages_median", "id_librivox",
+    "ratings_average", "ratings_count", "subject", "publish_year",
+    # Dotted on purpose: a price belongs to a printing, and OL serves the
+    # field for editions only.
+    "editions.opds_acquisitions",
+]
 
 
 class OpenLibraryDataProvider(DataProvider):
@@ -2371,6 +2797,50 @@ class OpenLibraryDataProvider(DataProvider):
 
     @typing.override
     @staticmethod
+    def fetch_work(work_olid: str, language: Optional[str] = None) -> Optional[OpenLibraryDataRecord]:
+        """The work record itself, unfiltered: ``search()`` keeps only records
+        whose surfaced edition has an offer, and a work whose best edition in
+        the reader's first language has none may still list one in another."""
+        language = canonical_language(language)
+        languages = parse_languages(language)
+        r = _get(
+            f"{OpenLibraryDataProvider.BASE_URL}/search.json",
+            params={
+                "q": f"key:/works/{work_olid}",
+                "editions": "true",
+                "limit": 1,
+                "fields": ",".join(_SEARCH_FIELDS),
+                **({"lang": languages[0]} if languages else {}),
+            },
+        )
+        docs = r.json().get("docs", [])
+        if not docs:
+            return None
+        doc = dict(docs[0])
+        if "editions" in doc and isinstance(doc["editions"], dict):
+            doc["editions"] = OpenLibraryDataRecord.EditionsResultSet.model_validate(doc["editions"])
+        record = OpenLibraryDataRecord.model_validate(doc)
+        record.request_language = language
+        _resolve_latin_author_names([record])
+        return record
+
+    @staticmethod
+    def work(
+        work_olid: str,
+        language: Optional[str] = None,
+        access: Optional[str] = None,
+    ) -> Optional[Publication]:
+        """The work as an OPDS publication listing its editions for a reader
+        of *language*, or None when there is no such work or nothing to list."""
+        record = OpenLibraryDataProvider.fetch_work(work_olid, language)
+        if record is None:
+            return None
+        editions = editions_of_work(work_olid, language, access)
+        if not editions:
+            return None
+        return record.to_work_publication(editions, canonical_language(language))
+
+    @staticmethod
     def search(
         query: str,
         limit: int = 50,
@@ -2418,15 +2888,7 @@ class OpenLibraryDataProvider(DataProvider):
         primary_language = languages[0] if languages else None
         media_type = canonical_media_type(media_type)
 
-        fields = [
-            "key", "title", "editions", "description", "providers", "author_name", "ia",
-            "cover_i", "cover_width", "cover_height", "availability", "ebook_access",
-            "author_key", "subtitle", "language", "number_of_pages_median", "id_librivox",
-            "ratings_average", "ratings_count", "subject", "publish_year",
-            # Dotted on purpose: a price belongs to a printing, and OL serves
-            # the field for editions only.
-            "editions.opds_acquisitions",
-        ]
+        fields = _SEARCH_FIELDS
 
         internal_query = query
         # ``mode`` may be a list: a record is kept if it belongs under any of
@@ -2478,7 +2940,9 @@ class OpenLibraryDataProvider(DataProvider):
             if "editions" in doc and isinstance(doc["editions"], dict):
                 doc = dict(doc)
                 doc["editions"] = OpenLibraryDataRecord.EditionsResultSet.model_validate(doc["editions"])
-            records.append(OpenLibraryDataRecord.model_validate(doc))
+            record = OpenLibraryDataRecord.model_validate(doc)
+            record.request_language = language
+            records.append(record)
 
         total = data.get("numFound", 0)
 
@@ -2536,31 +3000,7 @@ class OpenLibraryDataProvider(DataProvider):
         if 'buyable' in modes:
             total = len(records)
 
-        # Resolve non-Latin author names (e.g. Cyrillic) to their Latin personal_name.
-        # OL's search index stores author_name from the author record's `name` field,
-        # which for authors like Chekhov is in their native script. We fetch the author
-        # record once (cached) and use personal_name when it is Latin-script.
-        olid_to_nonlatin: dict[str, str] = {}  # olid -> first non-Latin name seen
-        for r in records:
-            if r.author_name and r.author_key:
-                for name, key in zip(r.author_name, r.author_key):
-                    if not _is_latin_name(name) and key not in _latin_author_cache and key not in olid_to_nonlatin:
-                        olid_to_nonlatin[key] = name
-        if olid_to_nonlatin:
-            from concurrent.futures import ThreadPoolExecutor, as_completed
-            with ThreadPoolExecutor(max_workers=min(len(olid_to_nonlatin), 4)) as pool:
-                futures = {pool.submit(_latin_name_for_author, olid, name): olid for olid, name in olid_to_nonlatin.items()}
-                for future in as_completed(futures):
-                    future.result()
-        for record in records:
-            if record.author_name and record.author_key:
-                resolved = [
-                    (_latin_author_cache.get(key) or name) if not _is_latin_name(name) else name
-                    for name, key in zip(record.author_name, record.author_key)
-                ]
-                # Preserve any trailing names that have no corresponding author_key entry.
-                resolved.extend(record.author_name[len(resolved):])
-                record.author_name = resolved
+        _resolve_latin_author_names(records)
 
         response_kwargs = {
             "provider": OpenLibraryDataProvider,
