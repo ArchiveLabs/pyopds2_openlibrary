@@ -229,16 +229,33 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
     class EditionProvider(BaseModel):
         """Basically the acquisition info for an edition."""
         access: Optional[str] = None
-        format: Optional[Literal['web', 'pdf', 'epub', 'audio']] = None
+        # Any string: Open Library also says ``daisy``, ``djvu``, ``mobi`` and
+        # ``txt``, and a Literal of four rejected the whole edition for one.
+        format: Optional[str] = None
         price: Optional[str] = None
         """Book price, eg '0.00 USD'"""
         url: Optional[str] = None
         provider_name: Optional[str] = None
 
+    class EditionAcquisition(BaseModel):
+        """One row of Open Library's ``opds_acquisitions``: an OPDS 2.0
+        acquisition link as the catalogue states it, synthesized for the
+        Internet Archive or harvested from a provider's own feed (then it
+        may carry ``properties.price``)."""
+        rel: str
+        href: str
+        type: Optional[str] = None
+        provider_name: Optional[str] = None
+        properties: Optional[dict] = None
+
+        model_config = {"extra": "allow"}
+
     class EditionDoc(BookSharedDoc):
         """Open Library edition document."""
         availability: Optional["OpenLibraryDataRecord.EditionAvailability"] = None
         providers: Optional[list["OpenLibraryDataRecord.EditionProvider"]] = None
+        publish_year: Optional[list[int]] = None
+        opds_acquisitions: Optional[list["OpenLibraryDataRecord.EditionAcquisition"]] = None
 
     class EditionsResultSet(BaseModel):
         numFound: Optional[int] = None
@@ -1247,7 +1264,8 @@ def _resolve_preferred_edition(
 
 _EDITION_RESOLVE_FIELDS = [
     "key", "title", "subtitle", "description", "cover_i", "cover_width", "cover_height",
-    "ebook_access", "language", "ia", "availability", "providers",
+    "ebook_access", "language", "ia", "availability", "providers", "publish_year",
+    "editions.opds_acquisitions",
 ]
 
 
@@ -2404,7 +2422,10 @@ class OpenLibraryDataProvider(DataProvider):
             "key", "title", "editions", "description", "providers", "author_name", "ia",
             "cover_i", "cover_width", "cover_height", "availability", "ebook_access",
             "author_key", "subtitle", "language", "number_of_pages_median", "id_librivox",
-            "ratings_average", "ratings_count", "subject",
+            "ratings_average", "ratings_count", "subject", "publish_year",
+            # Dotted on purpose: a price belongs to a printing, and OL serves
+            # the field for editions only.
+            "editions.opds_acquisitions",
         ]
 
         internal_query = query
