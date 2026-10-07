@@ -196,21 +196,27 @@ class TestComposition:
     def test_one_query_per_tier_and_language_tiers_outer(self):
         queries = openlibrary._edition_queries("OL60149W", "en,fr", None)
         assert queries == [
-            ("key:/works/OL60149W ebook_access:public language:eng", "en"),
-            ("key:/works/OL60149W ebook_access:public language:fre", "fr"),
-            ("key:/works/OL60149W ebook_access:borrowable language:eng", "en"),
-            ("key:/works/OL60149W ebook_access:borrowable language:fre", "fr"),
+            ("key:/works/OL60149W edition.ebook_access:public edition.language:eng", "en"),
+            ("key:/works/OL60149W edition.ebook_access:public edition.language:fre", "fr"),
+            ("key:/works/OL60149W edition.ebook_access:borrowable edition.language:eng", "en"),
+            ("key:/works/OL60149W edition.ebook_access:borrowable edition.language:fre", "fr"),
         ]
 
     def test_no_language_is_one_query_per_tier_in_any_language(self):
         assert openlibrary._edition_queries("OL1W", None, None) == [
-            ("key:/works/OL1W ebook_access:public", None),
-            ("key:/works/OL1W ebook_access:borrowable", None),
+            ("key:/works/OL1W edition.ebook_access:public", None),
+            ("key:/works/OL1W edition.ebook_access:borrowable", None),
         ]
+
+    def test_the_clauses_are_scoped_to_editions_so_the_work_is_not_filtered(self):
+        """A public-domain work's ``ebook_access`` is ``public``; an unscoped
+        ``ebook_access:borrowable`` would match no work and list no loans."""
+        for q, _ in openlibrary._edition_queries("OL66554W", "en", None):
+            assert " ebook_access:" not in q and " language:" not in q
 
     def test_print_disabled_asks_for_that_tier_alone(self):
         assert [q for q, _ in openlibrary._edition_queries("OL1W", "en", "print_disabled")] == [
-            "key:/works/OL1W ebook_access:printdisabled language:eng"]
+            "key:/works/OL1W edition.ebook_access:printdisabled edition.language:eng"]
 
     def test_editions_of_work_composes_and_ranks(self):
         def answer(url, *, params=None, **_):

@@ -723,8 +723,9 @@ def map_ol_format_to_mime(ol_format: Literal['web', 'pdf', 'epub', 'audio', 'dai
 #
 # Open Library's search answers one edition per work per call, so a work's
 # list is composed: one call per (language, access tier), each asking for
-# the best edition under that pair. The tier clause in ``q`` is what keeps
-# an edition with no usable offer out of the list; there is no post-filter.
+# the best edition under that pair. The tier clause in ``q``, scoped to
+# editions, is what keeps an edition with no usable offer out of the list;
+# there is no post-filter.
 
 _OPDS_ACQUISITION = "http://opds-spec.org/acquisition"
 REL_OPEN_ACCESS = f"{_OPDS_ACQUISITION}/open-access"
@@ -938,12 +939,15 @@ def _edition_queries(
     tiers = ("printdisabled",) if access == "print_disabled" else _EDITION_TIERS
     pairs = [(iso, iso_639_1_to_marc(iso)) for iso in parse_languages(canonical_language(language))]
     pairs = [(iso, marc) for iso, marc in pairs if marc] or [(None, None)]
+    # ``edition.``-scoped: a bare ``ebook_access:`` or ``language:`` clause
+    # also filters the *work*, whose ``ebook_access`` is its best edition's, so
+    # asking a public-domain work for its loans matched nothing at all.
     queries: list[tuple[str, Optional[str]]] = []
     for tier in tiers:
         for iso, marc in pairs:
-            q = f"key:/works/{work_olid} ebook_access:{tier}"
+            q = f"key:/works/{work_olid} edition.ebook_access:{tier}"
             if marc:
-                q = f"{q} language:{marc}"
+                q = f"{q} edition.language:{marc}"
             queries.append((q, iso))
     return queries
 
