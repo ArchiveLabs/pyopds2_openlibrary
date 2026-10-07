@@ -501,14 +501,22 @@ class TestOpenLibraryDataProvider:
 
             # Pass access="print_disabled" when testing print-disabled books
             search_access = "print_disabled" if ebook_access == "printdisabled" else None
-            catalog = Catalog.create(OpenLibraryDataProvider.search("any query", access=search_access))
-            publication = catalog.publications[0]
-            acquisition_link = next((link for link in publication.links if '/acquisition/' in link.rel), None)
-            return acquisition_link.properties['availability']
+            response = OpenLibraryDataProvider.search("any query", access=search_access)
+            # The edition document keeps the acquisition link's own availability…
+            edition = response.records[0].to_edition_publication()
+            acquisition_link = next((link for link in edition.links if '/acquisition/' in link.rel), None)
+            # …and the feed's publication is the work, whose one alternate says
+            # the same thing in its hint.
+            work = Catalog.create(response).publications[0]
+            alternate = next(link for link in work.links if link.properties and "edition" in link.properties)
+            return acquisition_link.properties['availability'], alternate.properties["edition"]["offer"]
 
-        assert get_availability("public", "open") == 'available'
-        assert get_availability("printdisabled", "borrow_available") == 'available'
-        assert get_availability("printdisabled", "borrow_unavailable") == 'unavailable'
+        assert get_availability("public", "open") == (
+            'available', {"rel": "http://opds-spec.org/acquisition/open-access"})
+        assert get_availability("printdisabled", "borrow_available") == (
+            'available', {"rel": "http://opds-spec.org/acquisition/borrow", "availability": {"state": "available"}})
+        assert get_availability("printdisabled", "borrow_unavailable") == (
+            'unavailable', {"rel": "http://opds-spec.org/acquisition/borrow", "availability": {"state": "unavailable"}})
 
 
 def _record_with_providers(*providers: OpenLibraryDataRecord.EditionProvider) -> OpenLibraryDataRecord:
