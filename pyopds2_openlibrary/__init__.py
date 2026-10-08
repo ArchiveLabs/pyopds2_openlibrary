@@ -536,6 +536,7 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
             link = edition_alternate_link(edition, self.author_name)
             if link is not None:
                 links.append(link)
+        links.extend(related_links(self.author_name, self.author_key, self.subject, language))
         return Publication(
             metadata=self.work_metadata(editions),
             links=links,
@@ -907,6 +908,115 @@ def edition_alternate_link(
         properties["authenticate"] = dict(_IA_AUTHENTICATE)
     properties["edition"] = edition_hint(edition, author_names, offer)
     return Link(rel="alternate", type=PUBLICATION_TYPE, href=href, title=edition.title, properties=properties)
+
+
+# A work links the shelves a reader might go on to as ``rel="related"``
+# feeds, each titled with the shelf's heading: more by its author, and the
+# popular books of its genre. Both are built from what the record already
+# carries, so they cost no call and ride on every work publication, a
+# search result's included.
+
+# The author page's Popular Books order (``POPULAR_SORT`` in the service).
+AUTHOR_POPULAR_SORT = "rating"
+
+def _words(text: str) -> list[str]:
+    return _re.findall(r"[^\W\d_]+", text.lower())
+
+
+def _names_phrase(words: list[str], phrase: list[str]) -> bool:
+    n = len(phrase)
+    return any(words[i:i + n] == phrase for i in range(len(words) - n + 1))
+
+
+def genre_href(
+    search_url: str,
+    subject: dict[str, str],
+    mode: str = "everything",
+    language: Optional[str] = None,
+    media_type: Optional[str] = None,
+) -> str:
+    """A genre's feed, the trending books of one ``FEATURED_SUBJECTS``
+    entry: what the front page's navigation links, and a work's Popular in
+    shelf with it."""
+    q = subject.get("query") or (
+        f'subject_key:{subject["key"].split("/")[-1]}'
+        f' -subject:"content_warning:cover"'
+        f' ebook_access:[borrowable TO *]'
+    )
+    params: dict[str, str] = {
+        "sort": "trending",
+        "title": subject["presentable_name"],
+        "query": q,
+    }
+    if mode != "everything":
+        params["mode"] = mode
+    if language:
+        params["language"] = language
+    if media_type:
+        params["media_type"] = media_type
+    return f"{search_url}?{urlencode(params)}"
+
+
+def work_genre(subjects: Optional[list[str]]) -> Optional[dict[str, str]]:
+    """The catalogue genre a work is shelved under: the one of
+    ``FEATURED_SUBJECTS`` the most of its subjects name, ties to the
+    catalogue's order. A subject names a genre when the genre's words run
+    through it ("Fiction, romance, general" names Romance), and names only
+    the longest genre it does ("Science fiction" is not also Science).
+
+    Not the first exact match: a work's subjects come in no order of
+    relevance, and an exact "History" sat 92nd of Moby-Dick's 97 while three
+    of them said fiction, historical. Only genres with a ``key`` qualify;
+    Standard Ebooks is a publisher, not a subject."""
+    genres = [
+        (s, _words(s["key"].split("/")[-1].replace("_", " ")))
+        for s in OpenLibraryDataProvider.FEATURED_SUBJECTS
+        if s.get("key")
+    ]
+    counts = [0] * len(genres)
+    for name in subjects or []:
+        words = _words(name)
+        named = [i for i, (_, phrase) in enumerate(genres) if _names_phrase(words, phrase)]
+        for i in named:
+            longer = any(j != i and len(genres[j][1]) > len(genres[i][1]) and _names_phrase(genres[j][1], genres[i][1]) for j in named)
+            if not longer:
+                counts[i] += 1
+    best = max(range(len(genres)), key=lambda i: (counts[i], -i), default=None)
+    return genres[best][0] if best is not None and counts[best] > 0 else None
+
+
+def related_links(
+    author_name: Optional[list[str]],
+    author_key: Optional[list[str]],
+    subjects: Optional[list[str]],
+    language: Optional[str] = None,
+) -> list[Link]:
+    """A work's ``rel="related"`` feeds: More by its first keyed author, and
+    Popular in its genre. Either is left out when the work cannot say it."""
+    opds_base = OpenLibraryDataProvider.OPDS_BASE_URL or f"{OpenLibraryDataProvider.BASE_URL}/opds"
+    links: list[Link] = []
+    author = next(
+        ((name, key) for name, key in zip(author_name or [], author_key or []) if name and key),
+        None,
+    )
+    if author is not None:
+        name, key = author
+        params = {"mode": "ebooks", **({"language": language} if language else {}), "sort": AUTHOR_POPULAR_SORT}
+        links.append(Link(
+            rel="related",
+            type="application/opds+json",
+            title=f"More by {name}",
+            href=f"{opds_base}/authors/{key}/books?{urlencode(params)}",
+        ))
+    genre = work_genre(subjects)
+    if genre is not None:
+        links.append(Link(
+            rel="related",
+            type="application/opds+json",
+            title=f"Popular in {genre['presentable_name']}",
+            href=genre_href(f"{opds_base}/search", genre, language=language),
+        ))
+    return links
 
 
 def rank_editions(
@@ -2754,26 +2864,10 @@ class OpenLibraryDataProvider(DataProvider):
                 if s.get("presentable_name") != "Standard Ebooks" or _is_english_or_all(language)
             ]
             for subject in visible_subjects:
-                q = subject.get("query") or (
-                    f'subject_key:{subject["key"].split("/")[-1]}'
-                    f' -subject:"content_warning:cover"'
-                    f' ebook_access:[borrowable TO *]'
-                )
-                nav_params: dict[str, str] = {
-                    "sort": "trending",
-                    "title": subject["presentable_name"],
-                    "query": q,
-                }
-                if mode != "everything":
-                    nav_params["mode"] = mode
-                if language:
-                    nav_params["language"] = language
-                if media_type:
-                    nav_params["media_type"] = media_type
                 navigation.append(Navigation(
                     type=media,
                     title=subject["presentable_name"],
-                    href=f"{search_url}?{urlencode(nav_params)}",
+                    href=genre_href(search_url, subject, mode, language, media_type),
                 ))
 
         # Links
