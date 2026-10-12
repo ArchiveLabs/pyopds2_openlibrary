@@ -256,6 +256,8 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
         providers: Optional[list["OpenLibraryDataRecord.EditionProvider"]] = None
         publish_year: Optional[list[int]] = None
         opds_acquisitions: Optional[list["OpenLibraryDataRecord.EditionAcquisition"]] = None
+        # ISBN-10s and -13s alike, as the printing lists them.
+        isbn: Optional[list[str]] = None
 
     class EditionsResultSet(BaseModel):
         numFound: Optional[int] = None
@@ -296,15 +298,19 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
             return "http://schema.org/Audiobook"
         return "http://schema.org/Book"
 
-    def links(self) -> List[Link]:
+    def links(self, provider: Optional[str] = None) -> List[Link]:
+        """The surfaced edition's links; with *provider*, only that
+        provider's acquisitions (``/books/OL…M?provider=``, the address a
+        work gives the second of two offers that would share this one)."""
         edition = self.editions.docs[0] if self.editions and self.editions.docs else None
         book = edition or self
         opds_base = OpenLibraryDataProvider.OPDS_BASE_URL or f"{OpenLibraryDataProvider.BASE_URL}/opds"
+        scope = f"?{urlencode({'provider': provider})}" if provider else ""
 
         links: list[Link] = [
             Link(
                 rel="self",
-                href=f"{opds_base}{book.key}",
+                href=f"{opds_base}{book.key}{scope}",
                 type="application/opds-publication+json",
             ),
             Link(
@@ -323,6 +329,8 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
         if edition and edition.providers:
             for acquisition in edition.providers:
                 if not acquisition.url:
+                    continue
+                if provider and acquisition.provider_name != provider:
                     continue
                 for link in ol_acquisition_to_opds_links(edition, acquisition):
                     key = (link.href, link.type)
@@ -345,7 +353,7 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
             and edition.providers
             and any(p.format in _DOWNLOADABLE_FORMATS for p in edition.providers)
         )
-        if self.id_librivox and not has_audio and not edition_has_ebook:
+        if self.id_librivox and not has_audio and not edition_has_ebook and not provider:
             links.append(Link(
                 rel="alternate",
                 href=f"https://librivox.org/{self.id_librivox[0]}",
@@ -458,12 +466,12 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
 
     # -- The work, and the editions it lists ---------------------------------
 
-    def to_edition_publication(self) -> Publication:
+    def to_edition_publication(self, provider: Optional[str] = None) -> Publication:
         """The surfaced edition as a publication of its own: the document at
         ``/books/OL…M``, terminal — its own metadata, cover and acquisition
         links, and the Archive's document as its one alternate when the
-        Archive holds it."""
-        return Publication(metadata=self.metadata(), links=self.links(), images=self.images())
+        Archive holds it. With *provider*, that provider's links alone."""
+        return Publication(metadata=self.metadata(), links=self.links(provider), images=self.images())
 
     def to_publication(self) -> Publication:
         """A record in a feed is a work (see ``to_work_publication``)."""
@@ -532,10 +540,7 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
             Link(rel="alternate", href=f"{OpenLibraryDataProvider.BASE_URL}{self.key}", type="text/html"),
             Link(rel="alternate", href=f"{OpenLibraryDataProvider.BASE_URL}{self.key}.json", type="application/json"),
         ]
-        for edition in editions:
-            link = edition_alternate_link(edition, self.author_name)
-            if link is not None:
-                links.append(link)
+        links.extend(edition_alternate_links(editions, self.author_name))
         links.extend(related_links(self.author_name, self.author_key, self.subject, language))
         return Publication(
             metadata=self.work_metadata(editions),
@@ -803,8 +808,10 @@ def offer_rank(rel: str, availability: Optional[str], price: Optional[dict]) -> 
     return (5, 0.0)
 
 
-def edition_offer(edition: OpenLibraryDataRecord.EditionDoc) -> Optional[EditionOffer]:
-    """The best offer an edition has, or None when it has none to list.
+def edition_offers(edition: OpenLibraryDataRecord.EditionDoc) -> list[EditionOffer]:
+    """The best offer of each provider an edition has, best first; empty
+    when it has none to list. A printing the Archive lends and a bookstore
+    sells is two offers, and a work lists it twice.
 
     Open Library's own ``opds_acquisitions`` first; a printing the Archive
     holds that came without them is still an Archive offer; and an older
@@ -832,9 +839,16 @@ def edition_offer(edition: OpenLibraryDataRecord.EditionDoc) -> Optional[Edition
                         cast(str, link.rel), provider.provider_name, _price_in(link.properties),
                         state if link.rel == REL_BORROW else None,
                     ))
-    if not candidates:
-        return None
-    return min(candidates, key=lambda o: offer_rank(o.rel, o.availability, o.price))
+    best: dict[Optional[str], EditionOffer] = {}
+    for offer in sorted(candidates, key=lambda o: offer_rank(o.rel, o.availability, o.price)):
+        best.setdefault(offer.provider_name, offer)
+    return list(best.values())
+
+
+def edition_offer(edition: OpenLibraryDataRecord.EditionDoc) -> Optional[EditionOffer]:
+    """The best offer an edition has, or None when it has none to list."""
+    offers = edition_offers(edition)
+    return offers[0] if offers else None
 
 
 def edition_type(edition: OpenLibraryDataRecord.EditionDoc) -> str:
@@ -886,11 +900,39 @@ def edition_hint(
     return {k: v for k, v in hint.items() if v is not None}
 
 
+# A provider that publishes its own OPDS document for a printing, by ISBN-13.
+# An offer of theirs points there, so the action is planned from what the
+# provider says. If the document does not answer, the app names the provider
+# as the problem; nothing here stands in for it.
+_PROVIDER_PUBLICATIONS = {
+    "betterworldbooks": "https://www.betterworldbooks.com/opds/publication/{isbn13}",
+}
+
+
+def isbn13(isbns: Optional[list[str]]) -> Optional[str]:
+    """The printing's ISBN-13: one it lists, else its ISBN-10 converted."""
+    cleaned = [raw.replace("-", "").replace(" ", "").upper() for raw in isbns or []]
+    for isbn in cleaned:
+        if len(isbn) == 13 and isbn.isdigit():
+            return isbn
+    for isbn in cleaned:
+        if len(isbn) == 10 and isbn[:9].isdigit():
+            core = "978" + isbn[:9]
+            check = (10 - sum(int(c) * (1 if i % 2 == 0 else 3) for i, c in enumerate(core)) % 10) % 10
+            return f"{core}{check}"
+    return None
+
+
 def edition_target(edition: OpenLibraryDataRecord.EditionDoc, offer: EditionOffer) -> str:
-    """Where the edition's alternate points: the Archive's document for a
-    printing the Archive serves, else the edition document here."""
+    """Where an offer's alternate points: the Archive's document for a
+    printing the Archive serves, the provider's own for one that publishes
+    it, else the edition document here."""
     if edition.ia and offer.provider_name == "ia":
         return _ia_webpub_href(edition.ia[0])
+    template = _PROVIDER_PUBLICATIONS.get(offer.provider_name or "")
+    isbn = isbn13(edition.isbn)
+    if template and isbn:
+        return template.format(isbn13=isbn)
     opds_base = OpenLibraryDataProvider.OPDS_BASE_URL or f"{OpenLibraryDataProvider.BASE_URL}/opds"
     return f"{opds_base}{edition.key}"
 
@@ -898,13 +940,16 @@ def edition_target(edition: OpenLibraryDataRecord.EditionDoc, offer: EditionOffe
 def edition_alternate_link(
     edition: OpenLibraryDataRecord.EditionDoc,
     author_names: Optional[list[str]] = None,
+    offer: Optional[EditionOffer] = None,
+    href: Optional[str] = None,
 ) -> Optional[Link]:
-    """The edition as one ``rel=alternate`` link on its work, or None when
-    it has no offer to list (nothing to point at)."""
-    offer = edition_offer(edition)
+    """One offer of the edition as a ``rel=alternate`` link on its work (its
+    best offer unless given), or None when it has no offer to list (nothing
+    to point at)."""
+    offer = offer or edition_offer(edition)
     if offer is None or not edition.key:
         return None
-    href = edition_target(edition, offer)
+    href = href or edition_target(edition, offer)
     properties: dict = {}
     if href.startswith("https://archive.org/"):
         properties["authenticate"] = dict(_IA_AUTHENTICATE)
@@ -1021,6 +1066,44 @@ def related_links(
     return links
 
 
+def edition_alternate_links(
+    editions: list[OpenLibraryDataRecord.EditionDoc],
+    author_names: Optional[list[str]] = None,
+) -> list[Link]:
+    """A work's editions as its alternates: one per offer of each edition,
+    best offer first, the given order kept within a rank.
+
+    Two offers of one printing that would point at the same document here
+    (neither provider publishes its own) get distinct addresses, the second
+    scoped with ``?provider=``, which serves that provider's links alone: a
+    client tells editions apart by href.
+    """
+    seen: set[tuple[str, Optional[str]]] = set()
+    pairs: list[tuple[OpenLibraryDataRecord.EditionDoc, EditionOffer]] = []
+    for edition in editions:
+        if not edition.key:
+            continue
+        for offer in edition_offers(edition):
+            if (edition.key, offer.provider_name) in seen:
+                continue
+            seen.add((edition.key, offer.provider_name))
+            pairs.append((edition, offer))
+    pairs.sort(key=lambda pair: offer_rank(pair[1].rel, pair[1].availability, pair[1].price))
+    links: list[Link] = []
+    hrefs: set[str] = set()
+    for edition, offer in pairs:
+        href = edition_target(edition, offer)
+        if href in hrefs and offer.provider_name:
+            href = f"{href}?{urlencode({'provider': offer.provider_name})}"
+        if href in hrefs:
+            continue
+        link = edition_alternate_link(edition, author_names, offer, href)
+        if link is not None:
+            hrefs.add(href)
+            links.append(link)
+    return links
+
+
 def rank_editions(
     editions: list[OpenLibraryDataRecord.EditionDoc],
 ) -> list[OpenLibraryDataRecord.EditionDoc]:
@@ -1071,7 +1154,13 @@ def _edition_for_query(q: str, iso_lang: Optional[str]) -> Optional[OpenLibraryD
             "q": q,
             "editions": "true",
             "limit": 1,
-            "fields": "key,editions," + ",".join(_EDITION_RESOLVE_FIELDS),
+            # ``isbn`` names the printing in a provider's own catalogue
+            # (``_PROVIDER_PUBLICATIONS``). Asked here, for one work, and not
+            # in feeds: undotted it also brings the work's every ISBN (a
+            # 25-book search went from 39 KB to 136 KB), and ``editions.isbn``
+            # beside ``editions.opds_acquisitions`` or ``providers`` makes
+            # search.json answer 500 (measured 2026-10-12).
+            "fields": "key,editions,isbn," + ",".join(_EDITION_RESOLVE_FIELDS),
             **({"lang": iso_lang} if iso_lang else {}),
         },
     )
