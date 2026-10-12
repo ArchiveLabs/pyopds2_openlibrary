@@ -749,6 +749,8 @@ _DISTRIBUTOR_NAMES = {
     "librivox": "LibriVox",
     "bwb": "Better World Books",
     "better_world_books": "Better World Books",
+    # How Open Library's harvested ``opds_acquisitions`` spell it.
+    "betterworldbooks": "Better World Books",
 }
 
 # The access tiers an edition is asked for, best first. Print-disabled

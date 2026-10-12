@@ -169,6 +169,9 @@ class TestHint:
         edition = _edition(key="/books/OL5M", opds_acquisitions=[_acq(OA, provider_name="librivox", type="audio/mpeg")])
         assert openlibrary.edition_hint(edition, None, openlibrary.edition_offer(edition))["@type"] == "http://schema.org/Audiobook"
 
+    def test_better_world_books_is_named_as_open_library_spells_it(self):
+        assert openlibrary.distributor_name("betterworldbooks") == "Better World Books"
+
     def test_an_unknown_provider_is_named_from_its_id(self):
         assert openlibrary.distributor_name("feed_books") == "Feed Books"
         assert openlibrary.distributor_name(None) is None
