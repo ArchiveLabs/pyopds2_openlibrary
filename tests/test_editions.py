@@ -169,12 +169,105 @@ class TestHint:
         edition = _edition(key="/books/OL5M", opds_acquisitions=[_acq(OA, provider_name="librivox", type="audio/mpeg")])
         assert openlibrary.edition_hint(edition, None, openlibrary.edition_offer(edition))["@type"] == "http://schema.org/Audiobook"
 
+    def test_better_world_books_is_named_as_open_library_spells_it(self):
+        assert openlibrary.distributor_name("betterworldbooks") == "Better World Books"
+
     def test_an_unknown_provider_is_named_from_its_id(self):
         assert openlibrary.distributor_name("feed_books") == "Feed Books"
         assert openlibrary.distributor_name(None) is None
 
     def test_no_offer_no_link(self):
         assert openlibrary.edition_alternate_link(_edition(key="/books/OL6M"), None) is None
+
+
+BWB_PUBLICATION = "https://www.betterworldbooks.com/opds/publication/9781737408802"
+
+
+def _brick_house(**overrides):
+    """The Brick House Apparent Quarterly, Vol. 1, as Open Library serves it
+    on 2026-10-09: one printing the Archive lends and Better World Books sells."""
+    doc = dict(
+        key="/books/OL32926810M", title="The Brick House Apparent Quarterly, Vol. 1",
+        ia=["isbn_9781737408802"], ebook_access="borrowable", language=["eng"],
+        isbn=["9781737408802", "1737408805"], availability={"status": "borrow_available"},
+        opds_acquisitions=[
+            _acq(BUY, "https://www.betterworldbooks.com/purchase/9781737408802", type="text/html",
+                 provider_name="betterworldbooks",
+                 properties={"price": {"value": 1.25, "currency": "USD"},
+                             "indirectAcquisition": [{"type": "application/epub+zip"}],
+                             "openlibrary_source": "harvested"}),
+            _acq(BORROW, "https://archive.org/details/isbn_9781737408802?view=theater&wrapper=false",
+                 type="text/html", provider_name="ia", properties={"openlibrary_source": "synthesized"}),
+        ],
+    )
+    doc.update(overrides)
+    return _edition(**doc)
+
+
+class TestOffersPerProvider:
+    def test_a_printing_lent_and_sold_is_two_offers_best_first(self):
+        assert openlibrary.edition_offers(_brick_house()) == [
+            openlibrary.EditionOffer(BORROW, "ia", None, "available"),
+            openlibrary.EditionOffer(BUY, "betterworldbooks", {"value": 1.25, "currency": "USD"}, None),
+        ]
+
+    def test_one_provider_keeps_its_best_offer_only(self):
+        edition = _edition(key="/books/OL1M", opds_acquisitions=[
+            _acq(BUY, provider_name="bwb", properties={"price": {"value": 20, "currency": "USD"}}),
+            _acq(BUY, provider_name="bwb", properties={"price": {"value": 5, "currency": "USD"}}),
+        ])
+        assert openlibrary.edition_offers(edition) == [
+            openlibrary.EditionOffer(BUY, "bwb", {"value": 5, "currency": "USD"}, None)]
+
+    def test_brick_house_is_two_alternates_the_loan_first(self):
+        links = openlibrary.edition_alternate_links([_brick_house()], ["Paul Ford"])
+        assert [l.href for l in links] == [IA_WEBPUB.format("isbn_9781737408802"), BWB_PUBLICATION]
+        loan, sale = links
+        assert "authenticate" in loan.properties
+        assert loan.properties["edition"]["distributor"] == "Internet Archive"
+        assert loan.properties["edition"]["offer"] == {"rel": BORROW, "availability": {"state": "available"}}
+        assert "authenticate" not in sale.properties
+        hint = sale.properties["edition"]
+        assert hint["distributor"] == "Better World Books"
+        assert hint["offer"] == {"rel": BUY, "price": {"value": 1.25, "currency": "USD"}}
+        assert {k: v for k, v in hint.items() if k not in ("distributor", "offer")} == \
+            {k: v for k, v in loan.properties["edition"].items() if k not in ("distributor", "offer")}
+
+    def test_an_edition_with_one_provider_is_the_link_it_always_was(self):
+        edition = _edition(key="/books/OL3M", ia=["howls0000jone"], ebook_access="borrowable",
+                           opds_acquisitions=[_acq(BORROW, provider_name="ia", type="text/html")])
+        assert openlibrary.edition_alternate_links([edition], None) == [
+            openlibrary.edition_alternate_link(edition, None)]
+
+    def test_a_better_world_books_offer_with_no_isbn_points_at_the_edition_document(self):
+        links = openlibrary.edition_alternate_links([_brick_house(isbn=None)], None)
+        assert links[1].href == "https://openlibrary.org/opds/books/OL32926810M"
+
+    def test_an_isbn_10_is_converted(self):
+        assert openlibrary.isbn13(["1737408805"]) == "9781737408802"
+        assert openlibrary.isbn13(["0-306-40615-2"]) == "9780306406157"
+        assert openlibrary.isbn13(["junk"]) is None
+
+    def test_two_offers_that_would_share_the_edition_document_get_distinct_hrefs(self):
+        edition = _edition(key="/books/OL7M", ebook_access="public", opds_acquisitions=[
+            _acq(OA, provider_name="standard_ebooks", type="application/epub+zip"),
+            _acq(BUY, provider_name="kobo", type="text/html", properties={"price": {"value": 3, "currency": "USD"}}),
+        ])
+        assert [l.href for l in openlibrary.edition_alternate_links([edition], None)] == [
+            "https://openlibrary.org/opds/books/OL7M",
+            "https://openlibrary.org/opds/books/OL7M?provider=kobo",
+        ]
+
+    def test_offers_rank_across_editions(self):
+        free = _edition(key="/books/OL9M", opds_acquisitions=[_acq(OA, provider_name="standard_ebooks")])
+        links = openlibrary.edition_alternate_links([_brick_house(), free], None)
+        assert [l.properties["edition"]["distributor"] for l in links] == \
+            ["Standard Ebooks", "Internet Archive", "Better World Books"]
+
+    def test_feeds_do_not_ask_for_isbns(self):
+        """Feeds do not ask for ISBNs; a feed's card is primed and the work
+        document, which does, replaces it."""
+        assert "isbn" not in openlibrary._SEARCH_FIELDS
 
 
 class TestRanking:
@@ -231,6 +324,7 @@ class TestComposition:
             docs = [{"key": "/works/OL1W", "editions": {"docs": [edition] if edition else []}}]
             assert params["editions"] == "true" and params["limit"] == 1
             assert "editions.opds_acquisitions" in params["fields"]
+            assert "isbn" in params["fields"].split(",")
             response = type("R", (), {})()
             response.json = lambda: {"docs": docs}
             return response
@@ -303,6 +397,27 @@ class TestWorkPublication:
         alternates = [l for l in publication["links"] if l["type"] == "application/opds-publication+json" and l["rel"] == "alternate"]
         assert [l["href"] for l in alternates] == [IA_WEBPUB.format("howls")]
         assert "edition" not in alternates[0].get("properties", {})
+
+
+class TestEditionDocumentScopedToAProvider:
+    def _record(self):
+        doc = _work_doc()
+        doc["editions"]["docs"][0]["providers"] = [
+            {"provider_name": "ia", "url": "https://archive.org/details/howls", "format": "web", "access": "borrow"},
+            {"provider_name": "kobo", "url": "https://kobo.example/howls", "format": "web", "access": "buy", "price": "3.00 USD"},
+        ]
+        return OpenLibraryDataRecord.model_validate(doc)
+
+    def test_unscoped_it_has_every_providers_links(self):
+        links = self._record().to_edition_publication().links
+        assert any(l.href.startswith("https://archive.org/") for l in links)
+        assert any(l.href == "https://kobo.example/howls" for l in links)
+
+    def test_scoped_it_has_that_providers_links_alone_and_says_so_in_its_self(self):
+        links = self._record().to_edition_publication("kobo").links
+        assert next(l for l in links if l.rel == "self").href == "https://openlibrary.org/opds/books/OL1M?provider=kobo"
+        assert not any(l.href.startswith("https://archive.org/") for l in links)
+        assert any(l.href == "https://kobo.example/howls" for l in links)
 
 
 class TestWorkRoute:
