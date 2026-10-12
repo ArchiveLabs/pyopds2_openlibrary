@@ -1,4 +1,5 @@
 import atexit as _atexit
+import logging as _logging
 import re as _re
 import threading as _threading
 import time as _time
@@ -12,6 +13,8 @@ from urllib.parse import urlencode
 import httpx
 from markdown_it import MarkdownIt as _MarkdownIt
 from pydantic import BaseModel, Field
+
+_logger = _logging.getLogger(__name__)
 
 from pyopds2 import (
     Catalog,
@@ -256,8 +259,6 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
         providers: Optional[list["OpenLibraryDataRecord.EditionProvider"]] = None
         publish_year: Optional[list[int]] = None
         opds_acquisitions: Optional[list["OpenLibraryDataRecord.EditionAcquisition"]] = None
-        # ISBN-10s and -13s alike, as the printing lists them.
-        isbn: Optional[list[str]] = None
 
     class EditionsResultSet(BaseModel):
         numFound: Optional[int] = None
@@ -280,6 +281,10 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
     # work's self link can echo it: the editions a work lists depend on it.
     # Not a Solr field, never serialised.
     request_language: Optional[str] = Field(None, exclude=True)
+    # The editions the work's own document lists for the same reader, when a
+    # feed composed them (``list_editions``), so a card carries the same
+    # alternates as the page it opens. Not a Solr field, never serialised.
+    listed_editions: Optional[list["OpenLibraryDataRecord.EditionDoc"]] = Field(None, exclude=True)
 
     @property
     def type(self) -> str:
@@ -532,7 +537,9 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
         defaults to the one the search was made with.
         """
         if editions is None:
-            editions = rank_editions(list(self.editions.docs)) if self.editions and self.editions.docs else []
+            editions = self.listed_editions or (
+                rank_editions(list(self.editions.docs)) if self.editions and self.editions.docs else []
+            )
         if language is None:
             language = self.request_language
         links: list[Link] = [
@@ -900,26 +907,35 @@ def edition_hint(
     return {k: v for k, v in hint.items() if v is not None}
 
 
-# A provider that publishes its own OPDS document for a printing, by ISBN-13.
-# An offer of theirs points there, so the action is planned from what the
+# A provider that publishes its own OPDS document for a printing, read off
+# the acquisition link Open Library harvested from it: the pattern of that
+# href, and the document's address in terms of what the pattern caught. An
+# offer of theirs points there, so the action is planned from what the
 # provider says. If the document does not answer, the app names the provider
 # as the problem; nothing here stands in for it.
-_PROVIDER_PUBLICATIONS = {
-    "betterworldbooks": "https://www.betterworldbooks.com/opds/publication/{isbn13}",
+#
+# The href, not the printing's ISBN: ``editions.isbn`` beside the acquisition
+# fields makes search.json answer 500, and undotted ``isbn`` brings the
+# work's every ISBN into each result (measured 2026-10-12).
+_PROVIDER_PUBLICATIONS: dict[str, tuple["_re.Pattern[str]", str]] = {
+    "betterworldbooks": (
+        _re.compile(r"^https://www\.betterworldbooks\.com/purchase/(\d{13})/?$"),
+        "https://www.betterworldbooks.com/opds/publication/{0}",
+    ),
 }
 
 
-def isbn13(isbns: Optional[list[str]]) -> Optional[str]:
-    """The printing's ISBN-13: one it lists, else its ISBN-10 converted."""
-    cleaned = [raw.replace("-", "").replace(" ", "").upper() for raw in isbns or []]
-    for isbn in cleaned:
-        if len(isbn) == 13 and isbn.isdigit():
-            return isbn
-    for isbn in cleaned:
-        if len(isbn) == 10 and isbn[:9].isdigit():
-            core = "978" + isbn[:9]
-            check = (10 - sum(int(c) * (1 if i % 2 == 0 else 3) for i, c in enumerate(core)) % 10) % 10
-            return f"{core}{check}"
+def provider_publication(edition: OpenLibraryDataRecord.EditionDoc, offer: EditionOffer) -> Optional[str]:
+    """The provider's own document for this offer, when it publishes one."""
+    pattern = _PROVIDER_PUBLICATIONS.get(offer.provider_name or "")
+    if pattern is None:
+        return None
+    regex, template = pattern
+    for row in edition.opds_acquisitions or []:
+        if row.provider_name == offer.provider_name and row.rel == offer.rel:
+            match = regex.match(row.href)
+            if match:
+                return template.format(*match.groups())
     return None
 
 
@@ -929,10 +945,9 @@ def edition_target(edition: OpenLibraryDataRecord.EditionDoc, offer: EditionOffe
     it, else the edition document here."""
     if edition.ia and offer.provider_name == "ia":
         return _ia_webpub_href(edition.ia[0])
-    template = _PROVIDER_PUBLICATIONS.get(offer.provider_name or "")
-    isbn = isbn13(edition.isbn)
-    if template and isbn:
-        return template.format(isbn13=isbn)
+    own = provider_publication(edition, offer)
+    if own:
+        return own
     opds_base = OpenLibraryDataProvider.OPDS_BASE_URL or f"{OpenLibraryDataProvider.BASE_URL}/opds"
     return f"{opds_base}{edition.key}"
 
@@ -1123,14 +1138,20 @@ def rank_editions(
     return [edition for edition, _ in ranked]
 
 
+def _works_clause(work_olids: list[str]) -> str:
+    keys = [f"/works/{olid}" for olid in work_olids]
+    return f"key:{keys[0]}" if len(keys) == 1 else f"key:({' OR '.join(keys)})"
+
+
 def _edition_queries(
-    work_olid: str,
+    work_olids: str | list[str],
     language: Optional[str],
     access: Optional[str],
 ) -> list[tuple[str, Optional[str]]]:
-    """The ``(q, lang)`` of each one-edition call, tiers outer, the reader's
-    languages inner, so the composed list is already in rank order within a
-    tier."""
+    """The ``(q, lang)`` of each call, tiers outer, the reader's languages
+    inner, so the composed list is already in rank order within a tier. One
+    call answers every work asked for, with its best edition under the pair."""
+    works = _works_clause([work_olids] if isinstance(work_olids, str) else work_olids)
     tiers = ("printdisabled",) if access == "print_disabled" else _EDITION_TIERS
     pairs = [(iso, iso_639_1_to_marc(iso)) for iso in parse_languages(canonical_language(language))]
     pairs = [(iso, marc) for iso, marc in pairs if marc] or [(None, None)]
@@ -1140,35 +1161,59 @@ def _edition_queries(
     queries: list[tuple[str, Optional[str]]] = []
     for tier in tiers:
         for iso, marc in pairs:
-            q = f"key:/works/{work_olid} edition.ebook_access:{tier}"
+            q = f"{works} edition.ebook_access:{tier}"
             if marc:
                 q = f"{q} edition.language:{marc}"
             queries.append((q, iso))
     return queries
 
 
-def _edition_for_query(q: str, iso_lang: Optional[str]) -> Optional[OpenLibraryDataRecord.EditionDoc]:
+def _editions_for_query(
+    q: str, iso_lang: Optional[str], count: int,
+) -> dict[str, OpenLibraryDataRecord.EditionDoc]:
+    """Each matching work's best edition under one query, by work OLID."""
     r = _get(
         f"{OpenLibraryDataProvider.BASE_URL}/search.json",
         params={
             "q": q,
             "editions": "true",
-            "limit": 1,
-            # ``isbn`` names the printing in a provider's own catalogue
-            # (``_PROVIDER_PUBLICATIONS``). Asked here, for one work, and not
-            # in feeds: undotted it also brings the work's every ISBN (a
-            # 25-book search went from 39 KB to 136 KB), and ``editions.isbn``
-            # beside ``editions.opds_acquisitions`` or ``providers`` makes
-            # search.json answer 500 (measured 2026-10-12).
-            "fields": "key,editions,isbn," + ",".join(_EDITION_RESOLVE_FIELDS),
+            "limit": count,
+            "fields": "key,editions," + ",".join(_EDITION_RESOLVE_FIELDS),
             **({"lang": iso_lang} if iso_lang else {}),
         },
     )
-    docs = r.json().get("docs", [])
-    edition_docs = docs[0].get("editions", {}).get("docs", []) if docs else []
-    if not edition_docs:
-        return None
-    return OpenLibraryDataRecord.EditionDoc.model_validate(edition_docs[0])
+    found: dict[str, OpenLibraryDataRecord.EditionDoc] = {}
+    for doc in r.json().get("docs", []):
+        edition_docs = (doc.get("editions") or {}).get("docs") or []
+        if doc.get("key") and edition_docs:
+            found[doc["key"].split("/")[-1]] = OpenLibraryDataRecord.EditionDoc.model_validate(edition_docs[0])
+    return found
+
+
+def editions_of_works(
+    work_olids: list[str],
+    language: Optional[str] = None,
+    access: Optional[str] = None,
+) -> dict[str, list[OpenLibraryDataRecord.EditionDoc]]:
+    """The editions each work lists for a reader, by work OLID: the best
+    edition under each (language, access tier), ranked. One call per pair
+    answers every work, so a feed page costs what one work does.
+
+    A call that fails raises; a list silently shorter would read as the
+    catalogue's answer.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    olids = list(dict.fromkeys(work_olids))
+    if not olids:
+        return {}
+    queries = _edition_queries(olids, language, access)
+    with ThreadPoolExecutor(max_workers=min(len(queries), 6)) as pool:
+        answers = list(pool.map(lambda pair: _editions_for_query(*pair, len(olids)), queries))
+    return {
+        olid: rank_editions([found[olid] for found in answers if olid in found])
+        for olid in olids
+    }
 
 
 def editions_of_work(
@@ -1176,18 +1221,32 @@ def editions_of_work(
     language: Optional[str] = None,
     access: Optional[str] = None,
 ) -> list[OpenLibraryDataRecord.EditionDoc]:
-    """The editions a work lists for a reader: the best edition under each
-    (language, access tier), composed from one call each and ranked.
+    """The editions a work lists for a reader (``editions_of_works``)."""
+    return editions_of_works([work_olid], language, access)[work_olid]
 
-    A call that fails raises; a work page with a silently shorter list would
-    read as the catalogue's answer.
+
+def list_editions(
+    records: list[OpenLibraryDataRecord],
+    language: Optional[str],
+    access: Optional[str],
+) -> None:
+    """Gives each work on a feed page the editions its own document lists,
+    so its card carries the same alternates and a client knows from the card
+    how many editions the page will show.
+
+    A failure leaves the cards with the edition the search surfaced, and is
+    logged: the feed is still worth serving, only its cards say less.
     """
-    from concurrent.futures import ThreadPoolExecutor
-
-    queries = _edition_queries(work_olid, language, access)
-    with ThreadPoolExecutor(max_workers=min(len(queries), 6)) as pool:
-        found = list(pool.map(lambda pair: _edition_for_query(*pair), queries))
-    return rank_editions([edition for edition in found if edition is not None])
+    olids = [r.work_olid() for r in records if (r.key or "").startswith("/works/")]
+    try:
+        listed = editions_of_works(olids, language, access)
+    except Exception:
+        _logger.warning("composing the editions of a feed's works failed; cards keep their surfaced edition", exc_info=True)
+        return
+    for record in records:
+        editions = listed.get(record.work_olid())
+        if editions:
+            record.listed_editions = editions
 
 
 class _HTMLStripper(_HTMLParser):
@@ -3190,6 +3249,11 @@ class OpenLibraryDataProvider(DataProvider):
             total = len(records)
 
         _resolve_latin_author_names(records)
+
+        # A card lists what its work's page lists. Not for an edition lookup
+        # (``/books/OL…M``), which serves the edition and no alternates of it.
+        if "edition_key:" not in query:
+            list_editions(records, language, access)
 
         response_kwargs = {
             "provider": OpenLibraryDataProvider,

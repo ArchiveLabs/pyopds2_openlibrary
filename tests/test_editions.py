@@ -189,7 +189,7 @@ def _brick_house(**overrides):
     doc = dict(
         key="/books/OL32926810M", title="The Brick House Apparent Quarterly, Vol. 1",
         ia=["isbn_9781737408802"], ebook_access="borrowable", language=["eng"],
-        isbn=["9781737408802", "1737408805"], availability={"status": "borrow_available"},
+        availability={"status": "borrow_available"},
         opds_acquisitions=[
             _acq(BUY, "https://www.betterworldbooks.com/purchase/9781737408802", type="text/html",
                  provider_name="betterworldbooks",
@@ -239,14 +239,11 @@ class TestOffersPerProvider:
         assert openlibrary.edition_alternate_links([edition], None) == [
             openlibrary.edition_alternate_link(edition, None)]
 
-    def test_a_better_world_books_offer_with_no_isbn_points_at_the_edition_document(self):
-        links = openlibrary.edition_alternate_links([_brick_house(isbn=None)], None)
+    def test_a_better_world_books_link_of_another_shape_points_at_the_edition_document(self):
+        edition = _brick_house()
+        edition.opds_acquisitions[0].href = "https://www.betterworldbooks.com/product/detail/x"
+        links = openlibrary.edition_alternate_links([edition], None)
         assert links[1].href == "https://openlibrary.org/opds/books/OL32926810M"
-
-    def test_an_isbn_10_is_converted(self):
-        assert openlibrary.isbn13(["1737408805"]) == "9781737408802"
-        assert openlibrary.isbn13(["0-306-40615-2"]) == "9780306406157"
-        assert openlibrary.isbn13(["junk"]) is None
 
     def test_two_offers_that_would_share_the_edition_document_get_distinct_hrefs(self):
         edition = _edition(key="/books/OL7M", ebook_access="public", opds_acquisitions=[
@@ -263,11 +260,6 @@ class TestOffersPerProvider:
         links = openlibrary.edition_alternate_links([_brick_house(), free], None)
         assert [l.properties["edition"]["distributor"] for l in links] == \
             ["Standard Ebooks", "Internet Archive", "Better World Books"]
-
-    def test_feeds_do_not_ask_for_isbns(self):
-        """Feeds do not ask for ISBNs; a feed's card is primed and the work
-        document, which does, replaces it."""
-        assert "isbn" not in openlibrary._SEARCH_FIELDS
 
 
 class TestRanking:
@@ -324,7 +316,6 @@ class TestComposition:
             docs = [{"key": "/works/OL1W", "editions": {"docs": [edition] if edition else []}}]
             assert params["editions"] == "true" and params["limit"] == 1
             assert "editions.opds_acquisitions" in params["fields"]
-            assert "isbn" in params["fields"].split(",")
             response = type("R", (), {})()
             response.json = lambda: {"docs": docs}
             return response
@@ -334,6 +325,72 @@ class TestComposition:
         assert mock_get.call_count == 4
         assert [e.key for e in editions] == ["/books/OLfreeM", "/books/OLloanM"]
         assert mock_get.call_args_list[0].kwargs["params"]["lang"] == "en"
+
+
+class TestEditionsOfAFeedPage:
+    def test_one_query_answers_every_work(self):
+        q, _ = openlibrary._edition_queries(["OL1W", "OL2W"], None, None)[0]
+        assert q == "key:(/works/OL1W OR /works/OL2W) edition.ebook_access:public"
+
+    def test_each_work_gets_its_best_edition_under_each_pair_ranked(self):
+        def answer(url, *, params=None, **_):
+            assert params["limit"] == 2
+            docs = []
+            if "public" in params["q"]:
+                docs = [{"key": "/works/OL1W", "editions": {"docs": [{"key": "/books/OL1freeM", "ebook_access": "public", "ia": ["f"]}]}}]
+            elif "borrowable" in params["q"]:
+                docs = [
+                    {"key": "/works/OL1W", "editions": {"docs": [{"key": "/books/OL1loanM", "ebook_access": "borrowable", "ia": ["l"]}]}},
+                    {"key": "/works/OL2W", "editions": {"docs": [{"key": "/books/OL2loanM", "ebook_access": "borrowable", "ia": ["m"]}]}},
+                ]
+            response = type("R", (), {})()
+            response.json = lambda: {"docs": docs}
+            return response
+
+        with patch.object(openlibrary, "_get", side_effect=answer) as mock_get:
+            listed = openlibrary.editions_of_works(["OL1W", "OL2W", "OL1W"], None, None)
+        assert mock_get.call_count == 2
+        assert {olid: [e.key for e in eds] for olid, eds in listed.items()} == {
+            "OL1W": ["/books/OL1freeM", "/books/OL1loanM"],
+            "OL2W": ["/books/OL2loanM"],
+        }
+
+    def test_no_works_no_calls(self):
+        with patch.object(openlibrary, "_get") as mock_get:
+            assert openlibrary.editions_of_works([], "en", None) == {}
+        mock_get.assert_not_called()
+
+    @pytest.mark.lists_editions
+    def test_a_card_lists_what_its_work_page_lists(self):
+        record = OpenLibraryDataRecord.model_validate(_work_doc())
+        free = _edition(key="/books/OL2M", ebook_access="public", ia=["pb"], language=["eng"])
+        loan = _edition(key="/books/OL1M", ebook_access="borrowable", ia=["howls"], language=["eng"])
+        with patch.object(openlibrary, "editions_of_works", return_value={"OL60149W": [free, loan]}) as composed:
+            openlibrary.list_editions([record], "en", None)
+        composed.assert_called_once_with(["OL60149W"], "en", None)
+        hrefs = [l.href for l in record.to_publication().links if l.properties and "edition" in l.properties]
+        assert hrefs == [IA_WEBPUB.format("pb"), IA_WEBPUB.format("howls")]
+
+    @pytest.mark.lists_editions
+    def test_a_failed_composition_leaves_the_surfaced_edition(self, caplog):
+        record = OpenLibraryDataRecord.model_validate(_work_doc())
+        with patch.object(openlibrary, "editions_of_works", side_effect=RuntimeError("500")):
+            openlibrary.list_editions([record], "en", None)
+        assert record.listed_editions is None
+        hrefs = [l.href for l in record.to_publication().links if l.properties and "edition" in l.properties]
+        assert hrefs == [IA_WEBPUB.format("howls")]
+        assert "composing the editions" in caplog.text
+
+    @pytest.mark.lists_editions
+    def test_search_lists_its_cards_editions_but_an_edition_lookup_does_not(self):
+        answer = type("R", (), {})()
+        answer.json = lambda: {"docs": [_work_doc()], "numFound": 1}
+        with patch.object(openlibrary, "_get", return_value=answer), \
+             patch.object(openlibrary, "list_editions") as listing:
+            openlibrary.OpenLibraryDataProvider.search(query="howl", language="en", require_cover=False)
+            assert listing.call_count == 1
+            openlibrary.OpenLibraryDataProvider.search(query="edition_key:OL1M", require_cover=False)
+            assert listing.call_count == 1
 
 
 def _work_doc(**overrides):
