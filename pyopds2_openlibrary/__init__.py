@@ -256,8 +256,6 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
         providers: Optional[list["OpenLibraryDataRecord.EditionProvider"]] = None
         publish_year: Optional[list[int]] = None
         opds_acquisitions: Optional[list["OpenLibraryDataRecord.EditionAcquisition"]] = None
-        # ISBN-10s and -13s alike, as the printing lists them.
-        isbn: Optional[list[str]] = None
 
     class EditionsResultSet(BaseModel):
         numFound: Optional[int] = None
@@ -900,26 +898,35 @@ def edition_hint(
     return {k: v for k, v in hint.items() if v is not None}
 
 
-# A provider that publishes its own OPDS document for a printing, by ISBN-13.
-# An offer of theirs points there, so the action is planned from what the
+# A provider that publishes its own OPDS document for a printing, read off
+# the acquisition link Open Library harvested from it: the pattern of that
+# href, and the document's address in terms of what the pattern caught. An
+# offer of theirs points there, so the action is planned from what the
 # provider says. If the document does not answer, the app names the provider
 # as the problem; nothing here stands in for it.
-_PROVIDER_PUBLICATIONS = {
-    "betterworldbooks": "https://www.betterworldbooks.com/opds/publication/{isbn13}",
+#
+# The href, not the printing's ISBN: ``editions.isbn`` beside the acquisition
+# fields makes search.json answer 500, and undotted ``isbn`` brings the
+# work's every ISBN into each result (measured 2026-10-12).
+_PROVIDER_PUBLICATIONS: dict[str, tuple["_re.Pattern[str]", str]] = {
+    "betterworldbooks": (
+        _re.compile(r"^https://www\.betterworldbooks\.com/purchase/(\d{13})/?$"),
+        "https://www.betterworldbooks.com/opds/publication/{0}",
+    ),
 }
 
 
-def isbn13(isbns: Optional[list[str]]) -> Optional[str]:
-    """The printing's ISBN-13: one it lists, else its ISBN-10 converted."""
-    cleaned = [raw.replace("-", "").replace(" ", "").upper() for raw in isbns or []]
-    for isbn in cleaned:
-        if len(isbn) == 13 and isbn.isdigit():
-            return isbn
-    for isbn in cleaned:
-        if len(isbn) == 10 and isbn[:9].isdigit():
-            core = "978" + isbn[:9]
-            check = (10 - sum(int(c) * (1 if i % 2 == 0 else 3) for i, c in enumerate(core)) % 10) % 10
-            return f"{core}{check}"
+def provider_publication(edition: OpenLibraryDataRecord.EditionDoc, offer: EditionOffer) -> Optional[str]:
+    """The provider's own document for this offer, when it publishes one."""
+    pattern = _PROVIDER_PUBLICATIONS.get(offer.provider_name or "")
+    if pattern is None:
+        return None
+    regex, template = pattern
+    for row in edition.opds_acquisitions or []:
+        if row.provider_name == offer.provider_name and row.rel == offer.rel:
+            match = regex.match(row.href)
+            if match:
+                return template.format(*match.groups())
     return None
 
 
@@ -929,10 +936,9 @@ def edition_target(edition: OpenLibraryDataRecord.EditionDoc, offer: EditionOffe
     it, else the edition document here."""
     if edition.ia and offer.provider_name == "ia":
         return _ia_webpub_href(edition.ia[0])
-    template = _PROVIDER_PUBLICATIONS.get(offer.provider_name or "")
-    isbn = isbn13(edition.isbn)
-    if template and isbn:
-        return template.format(isbn13=isbn)
+    own = provider_publication(edition, offer)
+    if own:
+        return own
     opds_base = OpenLibraryDataProvider.OPDS_BASE_URL or f"{OpenLibraryDataProvider.BASE_URL}/opds"
     return f"{opds_base}{edition.key}"
 
@@ -1154,13 +1160,7 @@ def _edition_for_query(q: str, iso_lang: Optional[str]) -> Optional[OpenLibraryD
             "q": q,
             "editions": "true",
             "limit": 1,
-            # ``isbn`` names the printing in a provider's own catalogue
-            # (``_PROVIDER_PUBLICATIONS``). Asked here, for one work, and not
-            # in feeds: undotted it also brings the work's every ISBN (a
-            # 25-book search went from 39 KB to 136 KB), and ``editions.isbn``
-            # beside ``editions.opds_acquisitions`` or ``providers`` makes
-            # search.json answer 500 (measured 2026-10-12).
-            "fields": "key,editions,isbn," + ",".join(_EDITION_RESOLVE_FIELDS),
+            "fields": "key,editions," + ",".join(_EDITION_RESOLVE_FIELDS),
             **({"lang": iso_lang} if iso_lang else {}),
         },
     )

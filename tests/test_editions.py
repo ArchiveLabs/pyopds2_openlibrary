@@ -189,7 +189,7 @@ def _brick_house(**overrides):
     doc = dict(
         key="/books/OL32926810M", title="The Brick House Apparent Quarterly, Vol. 1",
         ia=["isbn_9781737408802"], ebook_access="borrowable", language=["eng"],
-        isbn=["9781737408802", "1737408805"], availability={"status": "borrow_available"},
+        availability={"status": "borrow_available"},
         opds_acquisitions=[
             _acq(BUY, "https://www.betterworldbooks.com/purchase/9781737408802", type="text/html",
                  provider_name="betterworldbooks",
@@ -239,14 +239,11 @@ class TestOffersPerProvider:
         assert openlibrary.edition_alternate_links([edition], None) == [
             openlibrary.edition_alternate_link(edition, None)]
 
-    def test_a_better_world_books_offer_with_no_isbn_points_at_the_edition_document(self):
-        links = openlibrary.edition_alternate_links([_brick_house(isbn=None)], None)
+    def test_a_better_world_books_link_of_another_shape_points_at_the_edition_document(self):
+        edition = _brick_house()
+        edition.opds_acquisitions[0].href = "https://www.betterworldbooks.com/product/detail/x"
+        links = openlibrary.edition_alternate_links([edition], None)
         assert links[1].href == "https://openlibrary.org/opds/books/OL32926810M"
-
-    def test_an_isbn_10_is_converted(self):
-        assert openlibrary.isbn13(["1737408805"]) == "9781737408802"
-        assert openlibrary.isbn13(["0-306-40615-2"]) == "9780306406157"
-        assert openlibrary.isbn13(["junk"]) is None
 
     def test_two_offers_that_would_share_the_edition_document_get_distinct_hrefs(self):
         edition = _edition(key="/books/OL7M", ebook_access="public", opds_acquisitions=[
@@ -263,11 +260,6 @@ class TestOffersPerProvider:
         links = openlibrary.edition_alternate_links([_brick_house(), free], None)
         assert [l.properties["edition"]["distributor"] for l in links] == \
             ["Standard Ebooks", "Internet Archive", "Better World Books"]
-
-    def test_feeds_do_not_ask_for_isbns(self):
-        """Feeds do not ask for ISBNs; a feed's card is primed and the work
-        document, which does, replaces it."""
-        assert "isbn" not in openlibrary._SEARCH_FIELDS
 
 
 class TestRanking:
@@ -324,7 +316,6 @@ class TestComposition:
             docs = [{"key": "/works/OL1W", "editions": {"docs": [edition] if edition else []}}]
             assert params["editions"] == "true" and params["limit"] == 1
             assert "editions.opds_acquisitions" in params["fields"]
-            assert "isbn" in params["fields"].split(",")
             response = type("R", (), {})()
             response.json = lambda: {"docs": docs}
             return response
