@@ -414,7 +414,7 @@ class TestWorkPublication:
         record.request_language = "en,fr"
         publication = record.to_publication().model_dump()
         self_link = next(l for l in publication["links"] if l["rel"] == "self")
-        assert self_link["href"] == "https://openlibrary.org/opds/works/OL60149W?language=en,fr"
+        assert self_link["href"] == "https://openlibrary.org/opds/works/OL60149W?language=en,fr&edition=OL1M"
         editions = [l for l in publication["links"] if l.get("properties", {}).get("edition")]
         assert [l["href"] for l in editions] == [IA_WEBPUB.format("howls")]
         assert publication["metadata"]["title"] == "Howl's Moving Castle"
@@ -428,7 +428,7 @@ class TestWorkPublication:
     def test_the_self_link_has_no_language_when_none_was_asked(self):
         record = OpenLibraryDataRecord.model_validate(_work_doc())
         self_link = next(l for l in record.to_work_publication().links if l.rel == "self")
-        assert self_link.href == "https://openlibrary.org/opds/works/OL60149W"
+        assert self_link.href == "https://openlibrary.org/opds/works/OL60149W?edition=OL1M"
 
     def test_the_composed_list_is_the_alternates_in_order_and_its_languages_the_metadata(self):
         record = OpenLibraryDataRecord.model_validate(_work_doc())
@@ -444,6 +444,15 @@ class TestWorkPublication:
         record = OpenLibraryDataRecord.model_validate(_work_doc())
         french = _edition(key="/books/OL2M", language=["fre"], ebook_access="public", ia=["pb"])
         assert record.to_work_publication([french], "fr").metadata.description is None
+
+    def test_a_pinned_edition_leads_although_another_ranks_better(self):
+        record = OpenLibraryDataRecord.model_validate(_work_doc())
+        loan = _edition(key="/books/OL1M", language=["eng"], ebook_access="borrowable", ia=["howls"])
+        free = _edition(key="/books/OL2M", language=["eng"], ebook_access="public", ia=["pb"])
+        publication = record.to_work_publication([loan, free], "en", pinned=True)
+        hrefs = [l.href for l in publication.links if l.properties and "edition" in l.properties]
+        assert hrefs == [IA_WEBPUB.format("howls"), IA_WEBPUB.format("pb")]
+        assert next(l for l in publication.links if l.rel == "self").href.endswith("?language=en&edition=OL1M")
 
     def test_the_edition_document_keeps_its_shape_and_gains_published(self):
         record = OpenLibraryDataRecord.model_validate(_work_doc())
@@ -494,7 +503,7 @@ class TestWorkRoute:
         with patch.object(openlibrary, "_get", side_effect=answer):
             publication = openlibrary.OpenLibraryDataProvider.work("OL60149W", "en")
         dumped = publication.model_dump()
-        assert next(l for l in dumped["links"] if l["rel"] == "self")["href"].endswith("/works/OL60149W?language=en")
+        assert next(l for l in dumped["links"] if l["rel"] == "self")["href"].endswith("/works/OL60149W?language=en&edition=OL2M")
         editions = [l for l in dumped["links"] if l.get("properties", {}).get("edition")]
         assert [l["title"] for l in editions] == ["Free one"]
 
@@ -514,3 +523,60 @@ class TestWorkRoute:
 
         with patch.object(openlibrary, "_get", side_effect=answer):
             assert openlibrary.OpenLibraryDataProvider.work("OL60149W", "zh") is None
+
+
+class TestPinnedEdition:
+    """A link names the edition it showed; following it again shows that one."""
+
+    def _answer(self, lookup=None):
+        def answer(url, *, params=None, **_):
+            q = params["q"]
+            response = type("R", (), {})()
+            if q == "key:/works/OL60149W":
+                response.json = lambda: {"docs": [_work_doc()]}
+            elif "edition_key:" in q:
+                response.json = lambda: {"docs": [{"key": "/works/OL60149W", "editions": {"docs": [lookup]}}] if lookup else []}
+            elif "public" in q:
+                response.json = lambda: {"docs": [{"key": "/works/OL60149W", "editions": {"docs": [
+                    {"key": "/books/OL2M", "title": "Free one", "language": ["eng"], "ebook_access": "public", "ia": ["free"]}]}}]}
+            elif "borrowable" in q:
+                response.json = lambda: {"docs": [{"key": "/works/OL60149W", "editions": {"docs": [
+                    {"key": "/books/OL1M", "title": "Lent one", "language": ["eng"], "ebook_access": "borrowable", "ia": ["howls"]}]}}]}
+            else:
+                response.json = lambda: {"docs": [{"key": "/works/OL60149W", "editions": {"docs": []}}]}
+            return response
+        return answer
+
+    def _alternates(self, publication):
+        return [l for l in publication.model_dump()["links"] if l.get("properties", {}).get("edition")]
+
+    def test_unpinned_the_best_offer_leads_and_the_self_names_it(self):
+        with patch.object(openlibrary, "_get", side_effect=self._answer()):
+            publication = openlibrary.OpenLibraryDataProvider.work("OL60149W", "en")
+        assert [l["title"] for l in self._alternates(publication)] == ["Free one", "Lent one"]
+        assert next(l for l in publication.links if l.rel == "self").href.endswith("&edition=OL2M")
+
+    def test_a_listed_edition_named_leads(self):
+        with patch.object(openlibrary, "_get", side_effect=self._answer()) as mock_get:
+            publication = openlibrary.OpenLibraryDataProvider.work("OL60149W", "en", edition="OL1M")
+        assert [l["title"] for l in self._alternates(publication)] == ["Lent one", "Free one"]
+        assert next(l for l in publication.links if l.rel == "self").href.endswith("?language=en&edition=OL1M")
+        assert not any("edition_key:" in c.kwargs["params"]["q"] for c in mock_get.call_args_list)
+
+    def test_an_edition_fallen_out_of_the_list_is_fetched_and_leads(self):
+        gone = {"key": "/books/OL9M", "title": "Old printing", "language": ["eng"], "ebook_access": "borrowable", "ia": ["old"]}
+        with patch.object(openlibrary, "_get", side_effect=self._answer(gone)):
+            publication = openlibrary.OpenLibraryDataProvider.work("OL60149W", "en", edition="OL9M")
+        assert [l["title"] for l in self._alternates(publication)] == ["Old printing", "Free one", "Lent one"]
+        assert next(l for l in publication.links if l.rel == "self").href.endswith("&edition=OL9M")
+
+    def test_an_edition_the_work_does_not_have_is_ignored(self):
+        with patch.object(openlibrary, "_get", side_effect=self._answer()):
+            publication = openlibrary.OpenLibraryDataProvider.work("OL60149W", "en", edition="OL404M")
+        assert [l["title"] for l in self._alternates(publication)] == ["Free one", "Lent one"]
+        assert next(l for l in publication.links if l.rel == "self").href.endswith("&edition=OL2M")
+
+    def test_a_feed_card_names_the_edition_it_shows(self):
+        record = OpenLibraryDataRecord.model_validate(_work_doc())
+        self_link = next(l for l in record.to_publication().links if l.rel == "self")
+        assert self_link.href == "https://openlibrary.org/opds/works/OL60149W?edition=OL1M"

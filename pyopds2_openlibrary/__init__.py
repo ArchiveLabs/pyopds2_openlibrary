@@ -505,12 +505,17 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
     def work_olid(self) -> str:
         return (self.key or "").split("/")[-1]
 
-    def work_self_href(self, language: Optional[str] = None) -> str:
-        """``…/opds/works/OL…W``, with the request's ``language`` echoed: the
-        editions listed depend on it, so it names the document."""
+    def work_self_href(self, language: Optional[str] = None, edition: Optional[str] = None) -> str:
+        """``…/opds/works/OL…W``, with the request's ``language`` echoed (the
+        editions listed depend on it) and the ``edition`` the document leads
+        with, so that following the link again shows the same printing
+        however the ranking has moved since."""
         opds_base = OpenLibraryDataProvider.OPDS_BASE_URL or f"{OpenLibraryDataProvider.BASE_URL}/opds"
         href = f"{opds_base}/works/{self.work_olid()}"
-        return f"{href}?language={language}" if language else href
+        params = [f"language={language}"] if language else []
+        if edition:
+            params.append(f"edition={edition}")
+        return f"{href}?{'&'.join(params)}" if params else href
 
     def work_metadata(
         self, editions: list["OpenLibraryDataRecord.EditionDoc"], language: Optional[str] = None
@@ -550,13 +555,17 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
         self,
         editions: Optional[list["OpenLibraryDataRecord.EditionDoc"]] = None,
         language: Optional[str] = None,
+        pinned: bool = False,
     ) -> Publication:
         """This work as an OPDS publication whose ``rel=alternate`` links of
         the publication type are its editions, best offer first.
 
         *editions* defaults to the ones Solr surfaced on this record (a feed's
         one), ranked; the work route passes the composed list. *language*
-        defaults to the one the search was made with.
+        defaults to the one the search was made with. The first edition is
+        the one the document leads with, and its self link names it. With
+        *pinned* the first edition leads although another ranks better: it
+        was asked for by name.
         """
         if editions is None:
             editions = self.listed_editions or (
@@ -564,12 +573,13 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
             )
         if language is None:
             language = self.request_language
+        lead = edition_olid(editions[0]) if editions else None
         links: list[Link] = [
-            Link(rel="self", href=self.work_self_href(language), type=PUBLICATION_TYPE),
+            Link(rel="self", href=self.work_self_href(language, lead), type=PUBLICATION_TYPE),
             Link(rel="alternate", href=f"{OpenLibraryDataProvider.BASE_URL}{self.key}", type="text/html"),
             Link(rel="alternate", href=f"{OpenLibraryDataProvider.BASE_URL}{self.key}.json", type="application/json"),
         ]
-        links.extend(edition_alternate_links(editions, self.author_name))
+        links.extend(edition_alternate_links(editions, self.author_name, editions[0].key if pinned and editions else None))
         links.extend(related_links(self.author_name, self.author_key, self.subject, language))
         return Publication(
             metadata=self.work_metadata(editions, language),
@@ -1103,12 +1113,19 @@ def related_links(
     return links
 
 
+def edition_olid(edition: OpenLibraryDataRecord.EditionDoc) -> Optional[str]:
+    """``OL…M`` from the edition's key, or None for an edition with none."""
+    return (edition.key or "").split("/")[-1] or None
+
+
 def edition_alternate_links(
     editions: list[OpenLibraryDataRecord.EditionDoc],
     author_names: Optional[list[str]] = None,
+    pinned_key: Optional[str] = None,
 ) -> list[Link]:
     """A work's editions as its alternates: one per offer of each edition,
-    best offer first, the given order kept within a rank.
+    best offer first, the given order kept within a rank. The offers of the
+    edition keyed *pinned_key* come before all of them.
 
     Two offers of one printing that would point at the same document here
     (neither provider publishes its own) get distinct addresses, the second
@@ -1125,7 +1142,10 @@ def edition_alternate_links(
                 continue
             seen.add((edition.key, offer.provider_name))
             pairs.append((edition, offer))
-    pairs.sort(key=lambda pair: offer_rank(pair[1].rel, pair[1].availability, pair[1].price))
+    pairs.sort(key=lambda pair: (
+        0 if pinned_key and pair[0].key == pinned_key else 1,
+        offer_rank(pair[1].rel, pair[1].availability, pair[1].price),
+    ))
     links: list[Link] = []
     hrefs: set[str] = set()
     for edition, offer in pairs:
@@ -1245,6 +1265,25 @@ def editions_of_work(
 ) -> list[OpenLibraryDataRecord.EditionDoc]:
     """The editions a work lists for a reader (``editions_of_works``)."""
     return editions_of_works([work_olid], language, access)[work_olid]
+
+
+def pinned_edition(
+    work_olid: str,
+    edition: str,
+    editions: list[OpenLibraryDataRecord.EditionDoc],
+) -> Optional[OpenLibraryDataRecord.EditionDoc]:
+    """The edition named, from the list when it is there, else fetched on its
+    own: the list is the best edition under each tier and language, and a
+    printing a reader opened can fall out of it (a loan taken, a cheaper sale
+    listed). None when the work has no such edition, or it offers nothing."""
+    key = f"/books/{edition}"
+    for listed in editions:
+        if listed.key == key:
+            return listed
+    found = _editions_for_query(f"key:/works/{work_olid} edition_key:{edition}", None, 1).get(work_olid)
+    if found is None or found.key != key or edition_offer(found) is None:
+        return None
+    return found
 
 
 def list_editions(
@@ -3103,16 +3142,25 @@ class OpenLibraryDataProvider(DataProvider):
         work_olid: str,
         language: Optional[str] = None,
         access: Optional[str] = None,
+        edition: Optional[str] = None,
     ) -> Optional[Publication]:
         """The work as an OPDS publication listing its editions for a reader
-        of *language*, or None when there is no such work or nothing to list."""
+        of *language*, or None when there is no such work or nothing to list.
+
+        With *edition* (``OL…M``) that printing leads, ahead of any that
+        ranks better: a link names the edition it showed, and following it
+        again shows the same one. An edition the work does not have, or that
+        offers nothing, is ignored and the best leads."""
         record = OpenLibraryDataProvider.fetch_work(work_olid, language)
         if record is None:
             return None
         editions = editions_of_work(work_olid, language, access)
+        lead = pinned_edition(work_olid, edition, editions) if edition else None
+        if lead is not None:
+            editions = [lead, *(e for e in editions if e.key != lead.key)]
         if not editions:
             return None
-        return record.to_work_publication(editions, canonical_language(language))
+        return record.to_work_publication(editions, canonical_language(language), pinned=lead is not None)
 
     @staticmethod
     def search(
