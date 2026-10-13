@@ -538,11 +538,16 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
         if not desc and self.description and (not languages or "en" in languages):
             desc = self.description
 
+        # The title is the printing's: the document names the edition it
+        # leads with (``work_self_href``), and a translation or a new edition
+        # can be titled otherwise than the work.
         first = editions[0] if editions else None
+        title = (first.title if first else None) or self.title
+        subtitle = first.subtitle if first and first.title else self.subtitle
         return Metadata(
             type=edition_type(first) if first else self.type,
-            title=self.title or "Untitled",
-            subtitle=self.subtitle,
+            title=title or "Untitled",
+            subtitle=subtitle,
             author=self._authors(),
             description=strip_markdown(desc) if desc else None,
             language=languages or None,

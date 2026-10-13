@@ -445,6 +445,19 @@ class TestWorkPublication:
         french = _edition(key="/books/OL2M", language=["fre"], ebook_access="public", ia=["pb"])
         assert record.to_work_publication([french], "fr").metadata.description is None
 
+    def test_the_title_is_the_leading_editions(self):
+        record = OpenLibraryDataRecord.model_validate(_work_doc(subtitle="A work subtitle"))
+        french = _edition(key="/books/OL2M", title="Le Château de Hurle", language=["fre"], ebook_access="public", ia=["pb"])
+        metadata = record.to_work_publication([french], "fr").metadata
+        assert metadata.title == "Le Château de Hurle"
+        assert metadata.subtitle is None
+
+    def test_an_untitled_edition_keeps_the_works_title(self):
+        record = OpenLibraryDataRecord.model_validate(_work_doc(subtitle="A work subtitle"))
+        untitled = _edition(key="/books/OL2M", ebook_access="public", ia=["pb"])
+        metadata = record.to_work_publication([untitled]).metadata
+        assert (metadata.title, metadata.subtitle) == ("Howl's Moving Castle", "A work subtitle")
+
     def test_a_pinned_edition_leads_although_another_ranks_better(self):
         record = OpenLibraryDataRecord.model_validate(_work_doc())
         loan = _edition(key="/books/OL1M", language=["eng"], ebook_access="borrowable", ia=["howls"])
@@ -554,12 +567,14 @@ class TestPinnedEdition:
         with patch.object(openlibrary, "_get", side_effect=self._answer()):
             publication = openlibrary.OpenLibraryDataProvider.work("OL60149W", "en")
         assert [l["title"] for l in self._alternates(publication)] == ["Free one", "Lent one"]
+        assert publication.metadata.title == "Free one"
         assert next(l for l in publication.links if l.rel == "self").href.endswith("&edition=OL2M")
 
-    def test_a_listed_edition_named_leads(self):
+    def test_a_listed_edition_named_leads_and_titles_the_page(self):
         with patch.object(openlibrary, "_get", side_effect=self._answer()) as mock_get:
             publication = openlibrary.OpenLibraryDataProvider.work("OL60149W", "en", edition="OL1M")
         assert [l["title"] for l in self._alternates(publication)] == ["Lent one", "Free one"]
+        assert publication.metadata.title == "Lent one"
         assert next(l for l in publication.links if l.rel == "self").href.endswith("?language=en&edition=OL1M")
         assert not any("edition_key:" in c.kwargs["params"]["q"] for c in mock_get.call_args_list)
 
