@@ -106,3 +106,47 @@ class TestRelatedLinks:
             OpenLibraryDataProvider.OPDS_BASE_URL = saved
         assert more_by.href.startswith("http://localhost:8080/authors/OL29497A/books?")
         assert popular.href.startswith("http://localhost:8080/search?")
+
+
+class TestGenreSubject:
+    """The genre is said as a subject too, marked by its scheme, so a client
+    can show it without reading it out of a shelf's title."""
+
+    def _genre_subject(self, publication):
+        subjects = publication.metadata.subject or []
+        return next((s for s in subjects if getattr(s, "scheme", None) == openlibrary.SCHEME_GENRE), None)
+
+    def test_the_genre_leads_the_subjects_with_its_scheme_and_code(self):
+        publication = _work().to_work_publication([], "en")
+        genre = self._genre_subject(publication)
+        assert publication.metadata.subject[0] is genre
+        assert genre.name == "Science Fiction"
+        assert genre.code == "science_fiction"
+
+    def test_it_links_the_same_feed_as_the_popular_in_shelf(self):
+        publication = _work().to_work_publication([], "en")
+        _, popular = _related(publication.links)
+        assert self._genre_subject(publication).links[0].href == popular.href
+
+    def test_a_search_results_card_says_it_too(self):
+        record = _work()
+        record.request_language = "fr"
+        publication = record.to_publication()
+        _, popular = _related(publication.links)
+        assert self._genre_subject(publication).links[0].href == popular.href
+
+    def test_a_work_in_no_genre_has_no_genre_subject(self):
+        publication = _work(subject=["Whaling"]).to_work_publication([])
+        assert self._genre_subject(publication) is None
+        assert [s.name for s in publication.metadata.subject] == ["Whaling"]
+
+    def test_the_other_subjects_carry_no_scheme(self):
+        publication = _work().to_work_publication([])
+        assert [s.scheme for s in publication.metadata.subject[1:]] == [None, None, None]
+
+    def test_it_is_written_out_with_its_scheme_and_code(self):
+        dumped = _work().to_work_publication([], "en").model_dump(mode="json", exclude_none=True, by_alias=True)
+        first = dumped["metadata"]["subject"][0]
+        assert first["scheme"] == openlibrary.SCHEME_GENRE
+        assert first["code"] == "science_fiction"
+        assert first["name"] == "Science Fiction"

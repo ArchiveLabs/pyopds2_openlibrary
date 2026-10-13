@@ -52,10 +52,14 @@ class Subject(BaseModel):
     """An OPDS 2.0 subject object: a display name plus a browse link.
 
     Open Library subjects are free-text, not drawn from a controlled
-    vocabulary (e.g. Thema), so ``code`` and ``scheme`` are intentionally
-    absent — only ``name`` and ``links`` are available.
+    vocabulary (e.g. Thema), so a subject is a ``name`` and its ``links``.
+    The one exception is a work's genre, which is drawn from the catalogue's
+    own list (``FEATURED_SUBJECTS``): it carries ``scheme`` (``SCHEME_GENRE``)
+    and ``code``, the genre's key, so a client can find it among the rest.
     """
     name: str
+    scheme: Optional[str] = None
+    code: Optional[str] = None
     links: Optional[List[Link]] = None
 
 
@@ -426,7 +430,7 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
             }
         return None
 
-    def _subjects(self) -> Optional[List[Subject]]:
+    def _subjects(self, language: Optional[str] = None) -> Optional[List[Subject]]:
         # Subjects are work-level. Emit at most 10 as navigable OPDS subject
         # objects whose link browses the app's /search by subject name. Embedded
         # double-quotes are stripped so the Solr quoted clause can't break; the
@@ -437,6 +441,22 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
             return None
         opds_base = OpenLibraryDataProvider.OPDS_BASE_URL or f"{OpenLibraryDataProvider.BASE_URL}/opds"
         subjects = []
+        # The genre first, marked by its scheme, and linked to the same feed
+        # as the work's Popular in shelf (related_links).
+        genre = work_genre(self.subject)
+        if genre is not None:
+            subjects.append(Subject(
+                name=genre["presentable_name"],
+                scheme=SCHEME_GENRE,
+                code=genre["key"].split("/")[-1],
+                links=[Link(
+                    type="application/opds+json",
+                    href=genre_href(
+                        f"{opds_base}/search", genre,
+                        language=language if language is not None else self.request_language,
+                    ),
+                )],
+            ))
         human_readable = [name for name in self.subject if ":" not in name]
         for name in human_readable[:10]:
             query = f'subject:"{name.replace(chr(34), "")}"'
@@ -492,7 +512,9 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
         href = f"{opds_base}/works/{self.work_olid()}"
         return f"{href}?language={language}" if language else href
 
-    def work_metadata(self, editions: list["OpenLibraryDataRecord.EditionDoc"]) -> Metadata:
+    def work_metadata(
+        self, editions: list["OpenLibraryDataRecord.EditionDoc"], language: Optional[str] = None
+    ) -> Metadata:
         """The work's own words, with what a card needs from its editions:
         the first edition's type, and the languages of the editions listed."""
         languages: list[str] = []
@@ -521,7 +543,7 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
             language=languages or None,
             numberOfPages=self.number_of_pages_median,
             aggregateRating=self._aggregate_rating(),
-            subject=self._subjects(),
+            subject=self._subjects(language),
         )
 
     def to_work_publication(
@@ -550,7 +572,7 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
         links.extend(edition_alternate_links(editions, self.author_name))
         links.extend(related_links(self.author_name, self.author_key, self.subject, language))
         return Publication(
-            metadata=self.work_metadata(editions),
+            metadata=self.work_metadata(editions, language),
             links=links,
             images=self._work_images(editions),
         )
@@ -2013,6 +2035,10 @@ REL_SORT_POPULAR: str = "http://opds-spec.org/sort/popular"
 # A feed-level ``images`` entry that pictures the person the feed is about:
 # the author's photo on ``/authors/<olid>``.
 REL_PORTRAIT: str = "https://openlibrary.org/opds/rel/portrait"
+# Not a relation but a subject scheme (RWPM subject object, ``scheme``),
+# documented on the same page: the subject that is the work's genre, the one
+# of the catalogue's genres its Popular in shelf is drawn from.
+SCHEME_GENRE: str = "https://openlibrary.org/opds/rel/genre"
 
 
 def _set_facet_rel(link: dict, rel: str, active: bool) -> None:
