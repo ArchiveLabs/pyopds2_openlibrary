@@ -166,7 +166,8 @@ class TestHint:
         assert hint["distributor"] == "Better World Books"
 
     def test_an_audio_offer_makes_an_audiobook(self):
-        edition = _edition(key="/books/OL5M", opds_acquisitions=[_acq(OA, provider_name="librivox", type="audio/mpeg")])
+        edition = _edition(key="/books/OL5M", ia=["x"], ebook_access="public",
+                           opds_acquisitions=[_acq(OA, provider_name="ia", type="audio/mpeg")])
         assert openlibrary.edition_hint(edition, None, openlibrary.edition_offer(edition))["@type"] == "http://schema.org/Audiobook"
 
     def test_better_world_books_is_named_as_open_library_spells_it(self):
@@ -260,6 +261,53 @@ class TestOffersPerProvider:
         links = openlibrary.edition_alternate_links([_brick_house(), free], None)
         assert [l.properties["edition"]["distributor"] for l in links] == \
             ["Standard Ebooks", "Internet Archive", "Better World Books"]
+
+
+def _librivox_086(**overrides):
+    """Librivox Short Story Collection 086 as Open Library serves it on
+    2026-10-14: its one row is LibriVox's catalogue page, synthesized as an
+    open-access ``audio/*`` acquisition, and the recording is the Archive's."""
+    doc = dict(
+        key="/books/OL33206228M", ia=["ss086_2004_librivox"], ebook_access="public",
+        opds_acquisitions=[_acq(OA, "https://librivox.org/14917", type="audio/*", provider_name="librivox",
+                                properties={"openlibrary_source": "synthesized"})],
+        providers=[{"access": "open-access", "format": "audio", "url": "https://librivox.org/14917",
+                    "provider_name": "librivox"}],
+    )
+    doc.update(overrides)
+    return _edition(**doc)
+
+
+class TestOffersTheirDocumentServes:
+    def test_a_row_the_edition_document_leaves_out_is_no_offer(self):
+        """The edition document draws no link for LibriVox's page, so an
+        alternate pointing there would be a page with nothing to do."""
+        assert openlibrary.edition_offers(_librivox_086(ia=None)) == []
+
+    def test_the_archives_recording_is_the_offer_instead(self):
+        assert openlibrary.edition_offers(_librivox_086()) == [
+            openlibrary.EditionOffer(OA, "ia", None, None)]
+        links = openlibrary.edition_alternate_links([_librivox_086()], None)
+        assert [l.href for l in links] == [IA_WEBPUB.format("ss086_2004_librivox")]
+        assert links[0].properties["edition"]["@type"] == "http://schema.org/Audiobook"
+
+    def test_a_web_page_that_is_not_a_sale_is_no_offer(self):
+        edition = _edition(key="/books/OL1M", opds_acquisitions=[
+            _acq(OA, "https://standardebooks.org/ebooks/x", type="text/html", provider_name="standard_ebooks")])
+        assert openlibrary.edition_offers(edition) == []
+
+    def test_what_the_edition_document_draws_is_kept(self):
+        edition = _edition(key="/books/OL1M", opds_acquisitions=[
+            _acq(OA, "https://standardebooks.org/x.epub", type="application/epub+zip", provider_name="standard_ebooks"),
+            _acq(BUY, "https://shop.example/x", type="text/html", provider_name="kobo"),
+        ])
+        assert [o.provider_name for o in openlibrary.edition_offers(edition)] == ["standard_ebooks", "kobo"]
+
+    def test_the_archives_and_a_providers_own_rows_are_kept_whatever_their_type(self):
+        assert openlibrary.edition_offers(_brick_house()) == [
+            openlibrary.EditionOffer(BORROW, "ia", None, "available"),
+            openlibrary.EditionOffer(BUY, "betterworldbooks", {"value": 1.25, "currency": "USD"}, None),
+        ]
 
 
 class TestRanking:

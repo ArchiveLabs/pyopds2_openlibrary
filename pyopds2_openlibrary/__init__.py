@@ -878,7 +878,7 @@ def edition_offers(edition: OpenLibraryDataRecord.EditionDoc) -> list[EditionOff
     state = _availability_state(edition)
     candidates: list[EditionOffer] = []
     for row in edition.opds_acquisitions or []:
-        if row.rel in (REL_OPEN_ACCESS, REL_BORROW, REL_BUY):
+        if row.rel in (REL_OPEN_ACCESS, REL_BORROW, REL_BUY) and _row_is_served(edition, row):
             candidates.append(EditionOffer(
                 row.rel, row.provider_name, _price_in(row.properties),
                 state if row.rel == REL_BORROW else None,
@@ -900,6 +900,32 @@ def edition_offers(edition: OpenLibraryDataRecord.EditionDoc) -> list[EditionOff
     for offer in sorted(candidates, key=lambda o: offer_rank(o.rel, o.availability, o.price)):
         best.setdefault(offer.provider_name, offer)
     return list(best.values())
+
+
+def _row_is_served(
+    edition: OpenLibraryDataRecord.EditionDoc,
+    row: OpenLibraryDataRecord.EditionAcquisition,
+) -> bool:
+    """Whether the document an offer made of *row* would point at carries
+    it. The Archive's document carries the Archive's rows and a provider's own
+    document its own; anything else points at the edition document here,
+    which draws its links through ``ol_acquisition_to_opds_links`` and leaves
+    out audio and web pages that are not a sale. Listing such a row made an
+    edition whose page offers nothing: LibriVox's catalogue page, which Open
+    Library synthesizes as an ``audio/*`` open-access row beside the
+    recording the Archive serves (OL33206228M, 2026-10-14). A row that says
+    no type is kept: nothing here knows it is not served."""
+    if row.provider_name == "ia" and edition.ia:
+        return True
+    own = _PROVIDER_PUBLICATIONS.get(row.provider_name or "")
+    if own is not None and own[0].match(row.href):
+        return True
+    media_type = (row.type or "").split(";", 1)[0].strip()
+    if media_type.startswith("audio/") or media_type in _AUDIOBOOK_TYPES:
+        return False
+    if media_type == "text/html" and row.rel != REL_BUY:
+        return False
+    return True
 
 
 def edition_offer(edition: OpenLibraryDataRecord.EditionDoc) -> Optional[EditionOffer]:
