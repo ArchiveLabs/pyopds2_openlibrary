@@ -285,6 +285,9 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
     # work's self link can echo it: the editions a work lists depend on it.
     # Not a Solr field, never serialised.
     request_language: Optional[str] = Field(None, exclude=True)
+    # Likewise the ``media_type``: under ``audiobook`` a work lists its
+    # recordings alone. Not a Solr field, never serialised.
+    request_media_type: Optional[str] = Field(None, exclude=True)
     # The editions the work's own document lists for the same reader, when a
     # feed composed them (``list_editions``), so a card carries the same
     # alternates as the page it opens. Not a Solr field, never serialised.
@@ -505,14 +508,21 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
     def work_olid(self) -> str:
         return (self.key or "").split("/")[-1]
 
-    def work_self_href(self, language: Optional[str] = None, edition: Optional[str] = None) -> str:
-        """``…/opds/works/OL…W``, with the request's ``language`` echoed (the
-        editions listed depend on it) and the ``edition`` the document leads
-        with, so that following the link again shows the same printing
-        however the ranking has moved since."""
+    def work_self_href(
+        self,
+        language: Optional[str] = None,
+        edition: Optional[str] = None,
+        media_type: Optional[str] = None,
+    ) -> str:
+        """``…/opds/works/OL…W``, with the request's ``language`` and
+        ``media_type`` echoed (the editions listed depend on both) and the
+        ``edition`` the document leads with, so that following the link again
+        shows the same printing however the ranking has moved since."""
         opds_base = OpenLibraryDataProvider.OPDS_BASE_URL or f"{OpenLibraryDataProvider.BASE_URL}/opds"
         href = f"{opds_base}/works/{self.work_olid()}"
         params = [f"language={language}"] if language else []
+        if lists_recordings(media_type):
+            params.append("media_type=audiobook")
         if edition:
             params.append(f"edition={edition}")
         return f"{href}?{'&'.join(params)}" if params else href
@@ -561,6 +571,7 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
         editions: Optional[list["OpenLibraryDataRecord.EditionDoc"]] = None,
         language: Optional[str] = None,
         pinned: bool = False,
+        media_type: Optional[str] = None,
     ) -> Publication:
         """This work as an OPDS publication whose ``rel=alternate`` links of
         the publication type are its editions, best offer first.
@@ -578,9 +589,11 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
             )
         if language is None:
             language = self.request_language
+        if media_type is None:
+            media_type = self.request_media_type
         lead = edition_olid(editions[0]) if editions else None
         links: list[Link] = [
-            Link(rel="self", href=self.work_self_href(language, lead), type=PUBLICATION_TYPE),
+            Link(rel="self", href=self.work_self_href(language, lead, media_type), type=PUBLICATION_TYPE),
             Link(rel="alternate", href=f"{OpenLibraryDataProvider.BASE_URL}{self.key}", type="text/html"),
             Link(rel="alternate", href=f"{OpenLibraryDataProvider.BASE_URL}{self.key}.json", type="application/json"),
         ]
@@ -1194,10 +1207,14 @@ def _edition_queries(
     work_olids: str | list[str],
     language: Optional[str],
     access: Optional[str],
+    media_type: Optional[str] = None,
 ) -> list[tuple[str, Optional[str]]]:
     """The ``(q, lang)`` of each call, tiers outer, the reader's languages
     inner, so the composed list is already in rank order within a tier. One
-    call answers every work asked for, with its best edition under the pair."""
+    call answers every work asked for, with its best edition under the pair.
+    Under ``media_type=audiobook`` every call asks for a recording: the
+    search matched the work on one (``id_librivox``), and a work listing its
+    printings first would be an ebook on an audiobook shelf."""
     works = _works_clause([work_olids] if isinstance(work_olids, str) else work_olids)
     tiers = ("printdisabled",) if access == "print_disabled" else _EDITION_TIERS
     pairs = [(iso, iso_639_1_to_marc(iso)) for iso in parse_languages(canonical_language(language))]
@@ -1205,12 +1222,15 @@ def _edition_queries(
     # ``edition.``-scoped: a bare ``ebook_access:`` or ``language:`` clause
     # also filters the *work*, whose ``ebook_access`` is its best edition's, so
     # asking a public-domain work for its loans matched nothing at all.
+    audio = lists_recordings(media_type)
     queries: list[tuple[str, Optional[str]]] = []
     for tier in tiers:
         for iso, marc in pairs:
             q = f"{works} edition.ebook_access:{tier}"
             if marc:
                 q = f"{q} edition.language:{marc}"
+            if audio:
+                q = f"{q} edition.id_librivox:*"
             queries.append((q, iso))
     return queries
 
@@ -1241,6 +1261,7 @@ def editions_of_works(
     work_olids: list[str],
     language: Optional[str] = None,
     access: Optional[str] = None,
+    media_type: Optional[str] = None,
 ) -> dict[str, list[OpenLibraryDataRecord.EditionDoc]]:
     """The editions each work lists for a reader, by work OLID: the best
     edition under each (language, access tier), ranked. One call per pair
@@ -1254,7 +1275,7 @@ def editions_of_works(
     olids = list(dict.fromkeys(work_olids))
     if not olids:
         return {}
-    queries = _edition_queries(olids, language, access)
+    queries = _edition_queries(olids, language, access, media_type)
     with ThreadPoolExecutor(max_workers=min(len(queries), 6)) as pool:
         answers = list(pool.map(lambda pair: _editions_for_query(*pair, len(olids)), queries))
     return {
@@ -1267,9 +1288,10 @@ def editions_of_work(
     work_olid: str,
     language: Optional[str] = None,
     access: Optional[str] = None,
+    media_type: Optional[str] = None,
 ) -> list[OpenLibraryDataRecord.EditionDoc]:
     """The editions a work lists for a reader (``editions_of_works``)."""
-    return editions_of_works([work_olid], language, access)[work_olid]
+    return editions_of_works([work_olid], language, access, media_type)[work_olid]
 
 
 def pinned_edition(
@@ -1295,6 +1317,7 @@ def list_editions(
     records: list[OpenLibraryDataRecord],
     language: Optional[str],
     access: Optional[str],
+    media_type: Optional[str] = None,
 ) -> None:
     """Gives each work on a feed page the editions its own document lists,
     so its card carries the same alternates and a client knows from the card
@@ -1305,7 +1328,7 @@ def list_editions(
     """
     olids = [r.work_olid() for r in records if (r.key or "").startswith("/works/")]
     try:
-        listed = editions_of_works(olids, language, access)
+        listed = editions_of_works(olids, language, access, media_type)
     except Exception:
         _logger.warning("composing the editions of a feed's works failed; cards keep their surfaced edition", exc_info=True)
         return
@@ -1667,6 +1690,12 @@ def canonical_mode(raw: Optional[str]) -> str:
 def parse_media_types(raw: Optional[str]) -> list[str]:
     """The media types a ``media_type`` parameter names, in canonical order."""
     return _parse_listed(raw, _MEDIA_TYPE_VALUES)
+
+
+def lists_recordings(media_type: Optional[str]) -> bool:
+    """Whether a work under this ``media_type`` lists its recordings alone:
+    under ``audiobook`` by itself. Any other value lists every edition."""
+    return parse_media_types(media_type) == ["audiobook"]
 
 
 def canonical_media_type(raw: Optional[str]) -> Optional[str]:
@@ -3148,6 +3177,7 @@ class OpenLibraryDataProvider(DataProvider):
         language: Optional[str] = None,
         access: Optional[str] = None,
         edition: Optional[str] = None,
+        media_type: Optional[str] = None,
     ) -> Optional[Publication]:
         """The work as an OPDS publication listing its editions for a reader
         of *language*, or None when there is no such work or nothing to list.
@@ -3155,17 +3185,21 @@ class OpenLibraryDataProvider(DataProvider):
         With *edition* (``OL…M``) that printing leads, ahead of any that
         ranks better: a link names the edition it showed, and following it
         again shows the same one. An edition the work does not have, or that
-        offers nothing, is ignored and the best leads."""
+        offers nothing, is ignored and the best leads. With *media_type*
+        ``audiobook`` only its recordings are listed."""
         record = OpenLibraryDataProvider.fetch_work(work_olid, language)
         if record is None:
             return None
-        editions = editions_of_work(work_olid, language, access)
+        media_type = canonical_media_type(media_type)
+        editions = editions_of_work(work_olid, language, access, media_type)
         lead = pinned_edition(work_olid, edition, editions) if edition else None
         if lead is not None:
             editions = [lead, *(e for e in editions if e.key != lead.key)]
         if not editions:
             return None
-        return record.to_work_publication(editions, canonical_language(language), pinned=lead is not None)
+        return record.to_work_publication(
+            editions, canonical_language(language), pinned=lead is not None, media_type=media_type,
+        )
 
     @staticmethod
     def search(
@@ -3269,6 +3303,7 @@ class OpenLibraryDataProvider(DataProvider):
                 doc["editions"] = OpenLibraryDataRecord.EditionsResultSet.model_validate(doc["editions"])
             record = OpenLibraryDataRecord.model_validate(doc)
             record.request_language = language
+            record.request_media_type = media_type
             records.append(record)
 
         total = data.get("numFound", 0)
@@ -3332,7 +3367,7 @@ class OpenLibraryDataProvider(DataProvider):
         # A card lists what its work's page lists. Not for an edition lookup
         # (``/books/OL…M``), which serves the edition and no alternates of it.
         if "edition_key:" not in query:
-            list_editions(records, language, access)
+            list_editions(records, language, access, media_type)
 
         response_kwargs = {
             "provider": OpenLibraryDataProvider,

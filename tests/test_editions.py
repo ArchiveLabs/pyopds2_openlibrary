@@ -303,6 +303,19 @@ class TestComposition:
         assert [q for q, _ in openlibrary._edition_queries("OL1W", "en", "print_disabled")] == [
             "key:/works/OL1W edition.ebook_access:printdisabled edition.language:eng"]
 
+    def test_audiobooks_alone_ask_every_call_for_a_recording(self):
+        """The search matched the work on its LibriVox recording; listing
+        its printings first put an ebook on an audiobook shelf."""
+        assert openlibrary._edition_queries("OL1W", "en", None, "audiobook") == [
+            ("key:/works/OL1W edition.ebook_access:public edition.language:eng edition.id_librivox:*", "en"),
+            ("key:/works/OL1W edition.ebook_access:borrowable edition.language:eng edition.id_librivox:*", "en"),
+        ]
+
+    def test_ebooks_or_both_list_every_edition(self):
+        for media_type in ("ebook", "ebook,audiobook", None):
+            for q, _ in openlibrary._edition_queries("OL1W", None, None, media_type):
+                assert "id_librivox" not in q
+
     def test_editions_of_work_composes_and_ranks(self):
         def answer(url, *, params=None, **_):
             q = params["q"]
@@ -366,8 +379,8 @@ class TestEditionsOfAFeedPage:
         free = _edition(key="/books/OL2M", ebook_access="public", ia=["pb"], language=["eng"])
         loan = _edition(key="/books/OL1M", ebook_access="borrowable", ia=["howls"], language=["eng"])
         with patch.object(openlibrary, "editions_of_works", return_value={"OL60149W": [free, loan]}) as composed:
-            openlibrary.list_editions([record], "en", None)
-        composed.assert_called_once_with(["OL60149W"], "en", None)
+            openlibrary.list_editions([record], "en", None, "audiobook")
+        composed.assert_called_once_with(["OL60149W"], "en", None, "audiobook")
         hrefs = [l.href for l in record.to_publication().links if l.properties and "edition" in l.properties]
         assert hrefs == [IA_WEBPUB.format("pb"), IA_WEBPUB.format("howls")]
 
@@ -424,6 +437,16 @@ class TestWorkPublication:
         assert publication["metadata"]["aggregateRating"]["ratingValue"] == 4.3
         assert publication["images"][0]["href"] == "https://covers.openlibrary.org/b/id/2-L.jpg"
         assert not any("/acquisition/" in str(l["rel"]) for l in publication["links"])
+
+    def test_the_self_link_echoes_audiobooks_alone_as_the_list_depends_on_it(self):
+        record = OpenLibraryDataRecord.model_validate(_work_doc())
+        record.request_media_type = "audiobook"
+        self_link = next(l for l in record.to_work_publication().links if l.rel == "self")
+        assert self_link.href == "https://openlibrary.org/opds/works/OL60149W?media_type=audiobook&edition=OL1M"
+        for media_type in ("ebook", "ebook,audiobook"):
+            record.request_media_type = media_type
+            self_link = next(l for l in record.to_work_publication().links if l.rel == "self")
+            assert self_link.href == "https://openlibrary.org/opds/works/OL60149W?edition=OL1M"
 
     def test_the_self_link_has_no_language_when_none_was_asked(self):
         record = OpenLibraryDataRecord.model_validate(_work_doc())
