@@ -410,6 +410,7 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
                             type="application/opds+json",
                             rel="author",
                         ),
+                        author_portrait_link(key),
                     ],
                 )
                 for name, key in zip(self.author_name, self.author_key)
@@ -1519,6 +1520,27 @@ def fetch_author_bio(olid: str) -> tuple[Optional[str], Optional[str]]:
     return info.name, info.bio
 
 
+def author_portrait_link(olid: str) -> Link:
+    """The author's portrait, addressed by their id rather than by photo id.
+
+    Spelled from the key a search result already carries, so it costs no
+    request: the covers server answers ``/a/olid/<olid>`` with the photo the
+    author record keeps. ``default=false`` makes it answer 404 for an author
+    with no photo, rather than a blank image a client would show as one; a
+    client falls back on the 404 as it would for any portrait that fails.
+    No size: it is not known without asking, and a client draws a portrait
+    into a shape of its own (a circle) whatever it measures.
+
+    The author page keeps ``author_photo_links``, which costs a request for
+    the record and one for the size, because there the size is worth having.
+    """
+    return Link(
+        href=f"https://covers.openlibrary.org/a/olid/{olid}-L.jpg?default=false",
+        type="image/jpeg",
+        rel=REL_PORTRAIT,
+    )
+
+
 def author_photo_links(info: AuthorInfo) -> Optional[List[Link]]:
     """The author page's ``images`` collection: the ``-L`` photo, carrying
     ``REL_PORTRAIT`` and, when known, the size of that exact file. ``None``
@@ -2132,7 +2154,9 @@ REL_FACET_ACCESS: str = "https://openlibrary.org/opds/rel/facet/access"
 # as does the Popular Books carousel on an author page.
 REL_SORT_POPULAR: str = "http://opds-spec.org/sort/popular"
 # A feed-level ``images`` entry that pictures the person the feed is about:
-# the author's photo on ``/authors/<olid>``.
+# the author's photo on ``/authors/<olid>``. Also a link on each author of a
+# publication (``metadata.author[].links``), so a client can picture an author
+# it has not opened: the search results' author.
 REL_PORTRAIT: str = "https://openlibrary.org/opds/rel/portrait"
 # Not a relation but a subject scheme (RWPM subject object, ``scheme``),
 # documented on the same page: the subject that is the work's genre, the one

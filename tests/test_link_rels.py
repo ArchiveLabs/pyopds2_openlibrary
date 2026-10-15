@@ -144,8 +144,17 @@ class TestCarouselRels:
 class TestAuthorPageRels:
     def test_both_contributor_links_refer_to_the_author(self):
         [author] = _record("Book").metadata().author
-        assert all(has_rel(link, "author") for link in author.links)
-        assert {link.type for link in author.links} == {"text/html", "application/opds+json"}
+        pages = [link for link in author.links if link.type != "image/jpeg"]
+        assert all(has_rel(link, "author") for link in pages)
+        assert {link.type for link in pages} == {"text/html", "application/opds+json"}
+
+    def test_a_contributor_is_pictured_by_the_portrait_relation(self):
+        # The same relation the author page's feed-level image carries, so a
+        # client reads one rel for "a picture of this person" wherever it is.
+        [author] = _record("Book").metadata().author
+        [portrait] = [link for link in author.links if link.type == "image/jpeg"]
+        assert portrait.rel == REL_PORTRAIT
+        assert not has_rel(portrait, "author")
 
     def test_the_portrait_relation_is_a_fixed_url_under_the_rel_path(self):
         assert REL_PORTRAIT == "https://openlibrary.org/opds/rel/portrait"

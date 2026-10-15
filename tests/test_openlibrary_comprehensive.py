@@ -632,11 +632,32 @@ class TestMetadata:
             ).metadata()
             assert metadata.author is not None
             assert metadata.author[0].links is not None
-            assert len(metadata.author[0].links) == 2
+            assert len(metadata.author[0].links) == 3
             assert metadata.author[0].links[1].href == "https://example.org/opds/authors/OL123A"
             assert metadata.author[0].links[1].type == "application/opds+json"
         finally:
             OpenLibraryDataProvider.OPDS_BASE_URL = original
+
+    def test_authors_with_keys_include_a_portrait_link_by_author_id(self):
+        # Spelled from the author key, so a search result pictures its
+        # authors without a request per author; default=false makes a missing
+        # photo a 404 rather than a blank image.
+        metadata = _record(
+            key="/works/OL1W",
+            title="Book",
+            author_name=["Author", "Other"],
+            author_key=["OL123A", "OL456A"],
+        ).metadata()
+        assert metadata.author is not None
+        portraits = [
+            [l for l in a.links if l.rel == "https://openlibrary.org/opds/rel/portrait"]
+            for a in metadata.author
+        ]
+        assert [[l.href for l in p] for p in portraits] == [
+            ["https://covers.openlibrary.org/a/olid/OL123A-L.jpg?default=false"],
+            ["https://covers.openlibrary.org/a/olid/OL456A-L.jpg?default=false"],
+        ]
+        assert all(p[0].type == "image/jpeg" for p in portraits)
 
     def test_authors_without_keys_name_only(self):
         metadata = _record(key="/works/OL1W", title="Book", author_name=["Author"], author_key=None).metadata()

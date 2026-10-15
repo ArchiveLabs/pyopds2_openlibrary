@@ -290,12 +290,17 @@ class TestOpenLibraryDataRecord:
             metadata = record.metadata()
             assert metadata.author is not None
             assert metadata.author[0].links is not None
-            assert len(metadata.author[0].links) == 2
+            assert len(metadata.author[0].links) == 3
             assert metadata.author[0].links[0].href == "https://openlibrary.org/authors/OL12345A"
             assert metadata.author[0].links[1].href == "https://example.org/opds/authors/OL12345A"
             assert metadata.author[0].links[1].type == "application/opds+json"
-            # Both refer to the author; the type tells them apart.
-            assert [l.rel for l in metadata.author[0].links] == ["author", "author"]
+            # The first two refer to the author, and the type tells them apart;
+            # the third pictures them.
+            assert [l.rel for l in metadata.author[0].links] == [
+                "author",
+                "author",
+                "https://openlibrary.org/opds/rel/portrait",
+            ]
         finally:
             OpenLibraryDataProvider.OPDS_BASE_URL = original
 
