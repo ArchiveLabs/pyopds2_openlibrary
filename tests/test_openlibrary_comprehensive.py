@@ -1163,7 +1163,7 @@ class TestFacetBuilders:
         assert len(facets) == 4
         assert facets[0]["metadata"]["title"] == "Availability"
         assert facets[1]["metadata"]["title"] == "Language"
-        assert facets[2]["metadata"]["title"] == "Media Type"
+        assert facets[2]["metadata"]["title"] == "Format"
         assert facets[3]["metadata"]["title"] == "Access"
 
     def test_build_facets_availability_links_titles(self):
@@ -1218,7 +1218,7 @@ class TestFacetBuilders:
         assert len(facets) == 4
         assert facets[0]["metadata"]["title"] == "Availability"
         assert facets[1]["metadata"]["title"] == "Language"
-        assert facets[2]["metadata"]["title"] == "Media Type"
+        assert facets[2]["metadata"]["title"] == "Format"
         assert facets[3]["metadata"]["title"] == "Access"
 
     def test_build_home_facets_uses_home_labels(self):

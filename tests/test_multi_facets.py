@@ -1,7 +1,7 @@
 """``mode`` and ``media_type`` as lists: ``mode=ebooks,open_access`` keeps a
 work that belongs under either.
 
-The reader app renders the Availability and Media Type facet groups as
+The reader app renders the Availability and Format facet groups as
 checkboxes, so a reader can tick "Borrow" and "Open Access" together. The feed ORs
 the ticked values, spells the list one way wherever it emits it, and marks
 every ticked option ``rel: "self"``.

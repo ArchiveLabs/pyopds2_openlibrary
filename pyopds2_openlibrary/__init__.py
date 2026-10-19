@@ -2183,7 +2183,7 @@ _AVAILABILITY_MODES: list[tuple[str, str]] = [
 # carousels that came back zero. Pruning by corpus size was too aggressive and
 # hid groups that would have filled fine for mid-tier languages.
 
-# Media type options for the Media Type facet group (OPDS 2.0 §2.4).
+# Media type options for the Format facet group (OPDS 2.0 §2.4).
 # ``None`` means "no media type filter" (All).
 _MEDIA_TYPE_OPTIONS: list[tuple[Optional[str], str]] = [
     (None, "All"),
@@ -2711,7 +2711,7 @@ class OpenLibraryDataProvider(DataProvider):
                 ),
             },
             {
-                "metadata": {"title": "Media Type"},
+                "metadata": {"title": "Format"},
                 "links": _build_media_type_links(
                     media_type=media_type,
                     href_fn=lambda mt: search_href(mt_val=mt),
@@ -2735,7 +2735,7 @@ class OpenLibraryDataProvider(DataProvider):
         access: Optional[str] = None,
         language_counts: Optional[dict[str, int]] = None,
     ) -> list[dict]:
-        """Build Availability, Language, and Media Type facet groups for the OPDS homepage.
+        """Build Availability, Language, and Format facet groups for the OPDS homepage.
 
         Uses the same canonical labels as ``build_facets``.
         Links point to ``<base_url>/?mode=<value>`` / ``<base_url>/?language=<code>``.
@@ -2819,7 +2819,7 @@ class OpenLibraryDataProvider(DataProvider):
                 ),
             },
             {
-                "metadata": {"title": "Media Type"},
+                "metadata": {"title": "Format"},
                 "links": _build_media_type_links(
                     media_type=media_type,
                     href_fn=mt_href,
@@ -2847,7 +2847,7 @@ class OpenLibraryDataProvider(DataProvider):
         sort: Optional[str] = None,
         path: Optional[str] = None,
     ) -> list[dict]:
-        """Build Availability, Language, and Media Type facet groups for an author catalog page.
+        """Build Availability, Language, and Format facet groups for an author catalog page.
 
         Links point to ``<base_url><path>?mode=<value>&...``, preserving the
         current page, limit, language, media_type and sort selections when
@@ -2901,7 +2901,7 @@ class OpenLibraryDataProvider(DataProvider):
                 ),
             },
             {
-                "metadata": {"title": "Media Type"},
+                "metadata": {"title": "Format"},
                 "links": _build_media_type_links(
                     media_type=media_type,
                     href_fn=lambda mt: author_href(mt_val=mt),

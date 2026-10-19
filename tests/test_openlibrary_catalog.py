@@ -801,7 +801,7 @@ class TestFacetCountsAndBuilder:
         assert len(facets) == 4
         assert facets[0]["metadata"]["title"] == "Availability"
         assert facets[1]["metadata"]["title"] == "Language"
-        assert facets[2]["metadata"]["title"] == "Media Type"
+        assert facets[2]["metadata"]["title"] == "Format"
         assert facets[3]["metadata"]["title"] == "Access"
 
         availability_titles = [l["title"] for l in facets[0]["links"]]
@@ -838,7 +838,7 @@ class TestFacetCountsAndBuilder:
             media_type="audiobook",
         )
 
-        assert facets[2]["metadata"]["title"] == "Media Type"
+        assert facets[2]["metadata"]["title"] == "Format"
         media_titles = [l["title"] for l in facets[2]["links"]]
         assert media_titles == ["All", "Books", "Audiobooks"]
 

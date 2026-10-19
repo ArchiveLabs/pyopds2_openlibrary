@@ -32,7 +32,7 @@ OPTIONS = [(None, "All"), ("en", "English"), ("fr", "French")]
 GROUP_RELS = {
     "Availability": REL_FACET_AVAILABILITY,
     "Language": REL_FACET_LANGUAGE,
-    "Media Type": REL_FACET_MEDIA_TYPE,
+    "Format": REL_FACET_MEDIA_TYPE,
     "Access": REL_FACET_ACCESS,
 }
 
