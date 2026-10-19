@@ -799,7 +799,7 @@ class TestFacetCountsAndBuilder:
         facets = build_facets(base_url="https://example.org/opds", query="fox", sort="new", mode="ebooks")
 
         assert len(facets) == 4
-        assert facets[0]["metadata"]["title"] == "Availability"
+        assert facets[0]["metadata"]["title"] == "Access"
         assert facets[1]["metadata"]["title"] == "Language"
         assert facets[2]["metadata"]["title"] == "Format"
         assert facets[3]["metadata"]["title"] == "Access"

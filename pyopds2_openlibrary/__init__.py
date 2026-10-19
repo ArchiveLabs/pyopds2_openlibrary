@@ -2695,7 +2695,7 @@ class OpenLibraryDataProvider(DataProvider):
 
         return [
             {
-                "metadata": {"title": "Availability"},
+                "metadata": {"title": "Access"},
                 "links": _build_availability_links(
                     mode=mode,
                     href_fn=lambda val: search_href(mode_val=val),
@@ -2803,7 +2803,7 @@ class OpenLibraryDataProvider(DataProvider):
 
         return [
             {
-                "metadata": {"title": "Availability"},
+                "metadata": {"title": "Access"},
                 "links": _build_availability_links(
                     mode=mode,
                     href_fn=home_href,
@@ -2886,7 +2886,7 @@ class OpenLibraryDataProvider(DataProvider):
 
         return [
             {
-                "metadata": {"title": "Availability"},
+                "metadata": {"title": "Access"},
                 "links": _build_availability_links(
                     mode=mode,
                     href_fn=lambda val: author_href(mode_val=val),

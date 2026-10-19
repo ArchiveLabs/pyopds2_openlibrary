@@ -1161,7 +1161,7 @@ class TestFacetBuilders:
     def test_build_facets_returns_availability_group(self):
         facets = build_facets(base_url="https://example.org/opds", query="cats")
         assert len(facets) == 4
-        assert facets[0]["metadata"]["title"] == "Availability"
+        assert facets[0]["metadata"]["title"] == "Access"
         assert facets[1]["metadata"]["title"] == "Language"
         assert facets[2]["metadata"]["title"] == "Format"
         assert facets[3]["metadata"]["title"] == "Access"
@@ -1216,7 +1216,7 @@ class TestFacetBuilders:
     def test_build_home_facets_returns_availability_only(self):
         facets = OpenLibraryDataProvider.build_home_facets(base_url="https://example.org/opds", mode="everything")
         assert len(facets) == 4
-        assert facets[0]["metadata"]["title"] == "Availability"
+        assert facets[0]["metadata"]["title"] == "Access"
         assert facets[1]["metadata"]["title"] == "Language"
         assert facets[2]["metadata"]["title"] == "Format"
         assert facets[3]["metadata"]["title"] == "Access"

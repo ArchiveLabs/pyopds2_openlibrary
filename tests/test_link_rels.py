@@ -29,12 +29,14 @@ from pyopds2_openlibrary import (
 
 OPTIONS = [(None, "All"), ("en", "English"), ("fr", "French")]
 
-GROUP_RELS = {
-    "Availability": REL_FACET_AVAILABILITY,
-    "Language": REL_FACET_LANGUAGE,
-    "Format": REL_FACET_MEDIA_TYPE,
-    "Access": REL_FACET_ACCESS,
-}
+# The groups in order, by title and relation. A list, not a dict keyed by
+# title: availability and print disability are both titled Access.
+GROUP_RELS = [
+    ("Access", REL_FACET_AVAILABILITY),
+    ("Language", REL_FACET_LANGUAGE),
+    ("Format", REL_FACET_MEDIA_TYPE),
+    ("Access", REL_FACET_ACCESS),
+]
 
 
 def _rels(link) -> list[str]:
@@ -44,7 +46,7 @@ def _rels(link) -> list[str]:
 
 class TestFacetLinkRels:
     def test_the_relations_are_urls_under_the_rel_path(self):
-        for rel in GROUP_RELS.values():
+        for _, rel in GROUP_RELS:
             assert rel.startswith("https://openlibrary.org/opds/rel/facet/")
 
     def test_every_availability_link_carries_the_group_rel(self):
@@ -86,9 +88,8 @@ class TestFacetLinkRels:
             home = OpenLibraryDataProvider.build_home_facets(base_url="https://x/opds", media_type="ebook")
             author = OpenLibraryDataProvider.build_author_facets(base_url="https://x/opds", olid="OL1A", access="print_disabled")
         for facets in (search, home, author):
-            assert [g["metadata"]["title"] for g in facets] == list(GROUP_RELS)
-            for group in facets:
-                expected = GROUP_RELS[group["metadata"]["title"]]
+            assert [g["metadata"]["title"] for g in facets] == [title for title, _ in GROUP_RELS]
+            for group, (_, expected) in zip(facets, GROUP_RELS):
                 for link in group["links"]:
                     rels = _rels(link)
                     assert [r for r in rels if r != "self"] == [expected], link
