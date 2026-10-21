@@ -9,6 +9,7 @@ strings, not built from the base URL.
 from __future__ import annotations
 
 from unittest.mock import patch
+from urllib.parse import parse_qs, urlparse
 
 from pyopds2 import DataProvider, has_rel
 
@@ -19,12 +20,15 @@ from pyopds2_openlibrary import (
     REL_FACET_AVAILABILITY,
     REL_FACET_LANGUAGE,
     REL_FACET_MEDIA_TYPE,
+    REL_FACET_SORT,
     REL_PORTRAIT,
+    REL_SORT_NEW,
     REL_SORT_POPULAR,
     _build_access_links,
     _build_availability_links,
     _build_language_links,
     _build_media_type_links,
+    _build_sort_links,
 )
 
 OPTIONS = [(None, "All"), ("en", "English"), ("fr", "French")]
@@ -101,6 +105,51 @@ class TestFacetLinkRels:
         a = OpenLibraryDataProvider.build_facets(base_url="https://a.example/opds", query="q")
         b = OpenLibraryDataProvider.build_facets(base_url="http://localhost:8090", query="q")
         assert [_rels(l) for g in a for l in g["links"]] == [_rels(l) for g in b for l in g["links"]]
+
+
+class TestSortGroup:
+    """A shelf or a genre offers its orders as a Sort group, found by
+    ``facet/sort``; an order OPDS names carries OPDS's relation as well."""
+
+    def _sort_group(self, **kwargs):
+        with patch("pyopds2_openlibrary.fetch_language_options", return_value=OPTIONS):
+            facets = OpenLibraryDataProvider.build_facets(base_url="https://x/opds", query="subject_key:art", **kwargs)
+        return [g for g in facets if any(has_rel(l, REL_FACET_SORT) for l in g["links"])]
+
+    def test_a_genre_offers_trending_recent_and_title_last(self):
+        with patch("pyopds2_openlibrary.fetch_language_options", return_value=OPTIONS):
+            facets = OpenLibraryDataProvider.build_facets(
+                base_url="https://x/opds", query="subject_key:art", sort="trending", title="Art",
+            )
+        assert [g["metadata"]["title"] for g in facets] == [t for t, _ in GROUP_RELS] + ["Sort"]
+        assert [l["title"] for l in facets[-1]["links"]] == ["Trending", "Recent", "Title"]
+
+    def test_every_sort_link_carries_the_group_rel_and_opds_order_rels(self):
+        links = _build_sort_links("new", href_fn=lambda v: f"?sort={v}")
+        by_title = {l["title"]: l for l in links}
+        assert by_title["Trending"]["rel"] == [REL_FACET_SORT, REL_SORT_POPULAR]
+        assert by_title["Recent"]["rel"] == ["self", REL_FACET_SORT, REL_SORT_NEW]
+        assert by_title["Recent"]["properties"] == {"active": True}
+        assert by_title["Title"]["rel"] == REL_FACET_SORT
+
+    def test_a_compound_sort_applies_the_order_it_leads_with(self):
+        links = _build_sort_links("trending,trending_score_hourly_sum", href_fn=lambda v: f"?sort={v}")
+        assert [l["title"] for l in links if has_rel(l, "self")] == ["Trending"]
+
+    def test_each_option_keeps_the_page_and_changes_only_the_order(self):
+        [group] = self._sort_group(sort="trending", title="Art", mode="ebooks", language="fr")
+        for link in group["links"]:
+            params = parse_qs(urlparse(link["href"]).query)
+            assert params["title"] == ["Art"]
+            assert params["mode"] == ["ebooks"]
+            assert params["language"] == ["fr"]
+        assert [parse_qs(urlparse(l["href"]).query)["sort"] for l in group["links"]] == [["trending"], ["new"], ["title"]]
+
+    def test_a_search_for_words_has_no_sort_group(self):
+        assert self._sort_group() == []
+
+    def test_the_trending_shelf_has_no_sort_group(self):
+        assert self._sort_group(sort="trending", title="Trending Books") == []
 
 
 def _record(title: str) -> OpenLibraryDataRecord:

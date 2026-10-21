@@ -2150,9 +2150,12 @@ REL_FACET_AVAILABILITY: str = "https://openlibrary.org/opds/rel/facet/availabili
 REL_FACET_LANGUAGE: str = "https://openlibrary.org/opds/rel/facet/language"
 REL_FACET_MEDIA_TYPE: str = "https://openlibrary.org/opds/rel/facet/media-type"
 REL_FACET_ACCESS: str = "https://openlibrary.org/opds/rel/facet/access"
+REL_FACET_SORT: str = "https://openlibrary.org/opds/rel/facet/sort"
 # The trending carousel's self link also carries this registered relation,
 # as does the Popular Books carousel on an author page.
 REL_SORT_POPULAR: str = "http://opds-spec.org/sort/popular"
+# OPDS's relation for the newest first: the Sort group's Recent option.
+REL_SORT_NEW: str = "http://opds-spec.org/sort/new"
 # A feed-level ``images`` entry that pictures the person the feed is about:
 # the author's photo on ``/authors/<olid>``. Also a link on each author of a
 # publication (``metadata.author[].links``), so a client can picture an author
@@ -2371,6 +2374,52 @@ def _build_access_links(
             link.setdefault("properties", {})["active"] = True
         links.append(link)
     return links
+
+
+# The orders the Sort facet group offers (OPDS 2.0 §2.4): the ``sort`` value,
+# the title, and OPDS's own relation for that order where it has one. Only
+# what Open Library's search can sort by; it has no order by author.
+_SORT_OPTIONS: list[tuple[str, str, Optional[str]]] = [
+    ("trending", "Trending", REL_SORT_POPULAR),
+    ("new", "Recent", REL_SORT_NEW),
+    ("title", "Title", None),
+]
+
+
+def _build_sort_links(
+    sort: Optional[str],
+    href_fn: typing.Callable[[str], str],
+) -> list[dict]:
+    """Build the list of sort facet link dicts per OPDS 2.0 §2.4.
+
+    Each option links to the same results in its order. The applied one is
+    the order ``sort`` leads with, so a genre's ``trending,trending_score_hourly_sum``
+    applies Trending. Every link carries ``REL_FACET_SORT``, and an order
+    OPDS names carries its relation too (``sort/popular``, ``sort/new``).
+    """
+    applied = (sort or "").split(",")[0].strip()
+    links = []
+    for value, label, order_rel in _SORT_OPTIONS:
+        active = value == applied
+        rels = [REL_FACET_SORT, *([order_rel] if order_rel else [])]
+        links.append({
+            "title": label,
+            "href": href_fn(value),
+            "type": "application/opds+json",
+            "rel": ["self", *rels] if active else (rels if len(rels) > 1 else rels[0]),
+            **({"properties": {"active": True}} if active else {}),
+        })
+    return links
+
+
+def offers_sort(sort: Optional[str], title: Optional[str]) -> bool:
+    """Whether a search page offers the Sort group: one that is a shelf or a
+    genre, which is opened in an order (``sort``), and is not the Trending
+    shelf, whose order is what it is. A search for words has no ``sort`` and
+    is in order of relevance, which no option would lead back to."""
+    if not sort:
+        return False
+    return _GROUP_RELS.get(title or "") != REL_SORT_POPULAR
 
 
 # ---------------------------------------------------------------------------
@@ -2642,8 +2691,8 @@ class OpenLibraryDataProvider(DataProvider):
         the specification.  Availability links point to ``/search``; for
         homepage facets use ``build_home_facets``.
 
-        The Sort group is retained in ``_build_sort_links`` but not included here.
-        To re-enable sort: add the Sort group dict to the returned list.
+        A shelf or a genre (a page opened with ``sort``) also gets a Sort
+        group, last; see ``offers_sort``.
 
         Args:
             language: Comma-separated ISO 639-1 codes for the active selection
@@ -2654,7 +2703,7 @@ class OpenLibraryDataProvider(DataProvider):
             title: Display title for the search results page (e.g. ``"Art"``).
                 Preserved in every facet href so switching facets keeps the
                 page title instead of falling back to "Search Results".
-            total: Reserved for Sort links when re-enabled.
+            total: Unused; kept for callers that pass it.
             availability_counts: ``{mode_value: item_count}`` per OPDS 2.0 §2.4.
         """
         language = canonical_language(language)
@@ -2689,9 +2738,12 @@ class OpenLibraryDataProvider(DataProvider):
                 params["title"] = title
             return f"{base_url}/search?{urlencode(params)}"
 
-        # Sort group is unplugged but preserved — re-enable by adding:
-        # {"metadata": {"title": "Sort"},
-        #  "links": _build_sort_links(sort, lambda sv: search_href(sort_val=sv), total)}
+        sort_groups = [
+            {
+                "metadata": {"title": "Sort"},
+                "links": _build_sort_links(sort, lambda sv: search_href(sort_val=sv)),
+            },
+        ] if offers_sort(sort, title) else []
 
         return [
             {
@@ -2724,6 +2776,7 @@ class OpenLibraryDataProvider(DataProvider):
                     href_fn=lambda ac: search_href(ac_val=ac),
                 ),
             },
+            *sort_groups,
         ]
 
     @staticmethod

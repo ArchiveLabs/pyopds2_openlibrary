@@ -798,11 +798,13 @@ class TestFacetCountsAndBuilder:
     def test_build_facets_groups_and_links_and_rels(self):
         facets = build_facets(base_url="https://example.org/opds", query="fox", sort="new", mode="ebooks")
 
-        assert len(facets) == 4
+        # Opened in an order, so a Sort group last.
+        assert len(facets) == 5
         assert facets[0]["metadata"]["title"] == "Access"
         assert facets[1]["metadata"]["title"] == "Language"
         assert facets[2]["metadata"]["title"] == "Format"
         assert facets[3]["metadata"]["title"] == "Access"
+        assert facets[4]["metadata"]["title"] == "Sort"
 
         availability_titles = [l["title"] for l in facets[0]["links"]]
         assert availability_titles == ["Everything", "Borrow", "Open Access", "Buy"]
