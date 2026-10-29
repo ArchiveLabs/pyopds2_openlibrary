@@ -1409,3 +1409,29 @@ class TestHttpClientSingleton:
         with patch('pyopds2_openlibrary._get_http_client', return_value=mock_client):
             pyopds2_openlibrary._get("https://openlibrary.org/search.json")
             mock_client.get.assert_called_once()
+
+
+class TestGetRetries:
+    @pytest.mark.parametrize("exc_type", [httpx.PoolTimeout, httpx.ReadTimeout, httpx.ConnectTimeout])
+    @patch("pyopds2_openlibrary._time.sleep")
+    @patch("pyopds2_openlibrary._get_http_client")
+    def test_a_timeout_is_not_retried(self, mock_get_client, _sleep, exc_type):
+        mock_client = MagicMock()
+        mock_get_client.return_value = mock_client
+        mock_client.get.side_effect = exc_type("")
+
+        with pytest.raises(exc_type):
+            openlibrary._get("https://openlibrary.org/search.json")
+        mock_client.get.assert_called_once()
+
+    @patch("pyopds2_openlibrary._time.sleep")
+    @patch("pyopds2_openlibrary._get_http_client")
+    def test_a_dropped_connection_is_retried(self, mock_get_client, _sleep):
+        mock_client = MagicMock()
+        mock_get_client.return_value = mock_client
+        ok = MagicMock(status_code=200)
+        ok.raise_for_status.return_value = None
+        mock_client.get.side_effect = [httpx.RemoteProtocolError("closed"), ok]
+
+        assert openlibrary._get("https://openlibrary.org/search.json") is ok
+        assert mock_client.get.call_count == 2

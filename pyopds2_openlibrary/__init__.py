@@ -82,7 +82,10 @@ Catalog.model_rebuild(force=True)
 # ebook_access clause before re-applying the user-selected availability mode.
 _EBOOK_ACCESS_CLAUSE_RE = _re.compile(r'\s*ebook_access:(?:\[[^\]]*\]|\S+)')
 
-_REQUEST_TIMEOUT: float = 30.0
+# A read that has not answered in this long is not going to make the page in
+# time, and while it waits it holds one of the pool's connections; at 30 s a
+# slow Open Library filled the pool and every other request failed waiting.
+_REQUEST_TIMEOUT: float = 10.0
 
 # HTTP status codes that indicate a transient server-side failure worth retrying.
 _RETRY_STATUS_CODES: frozenset[int] = frozenset({429, 500, 502, 503, 504})
@@ -148,6 +151,10 @@ def _get(url: str, *, params=None, timeout: float = _REQUEST_TIMEOUT) -> httpx.R
 
     Respects the ``Retry-After`` response header on 429 replies, capped at
     ``_RETRY_AFTER_MAX`` seconds to avoid holding thread-pool threads too long.
+
+    Timeouts are not retried. A pool timeout means every connection is busy,
+    so another wait only queues behind them; a read timeout means Open
+    Library is slow, so another attempt holds a connection for as long again.
     """
     delays = list(_RETRY_DELAYS)  # mutable copy so Retry-After can adjust future delays
     for i, delay in enumerate(delays):
@@ -171,6 +178,8 @@ def _get(url: str, *, params=None, timeout: float = _REQUEST_TIMEOUT) -> httpx.R
                 continue
             r.raise_for_status()
             return r
+        except httpx.TimeoutException:
+            raise
         except httpx.TransportError:
             if i == len(delays) - 1:
                 raise
