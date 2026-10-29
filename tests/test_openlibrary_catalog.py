@@ -803,7 +803,7 @@ class TestFacetCountsAndBuilder:
         assert facets[0]["metadata"]["title"] == "Access"
         assert facets[1]["metadata"]["title"] == "Language"
         assert facets[2]["metadata"]["title"] == "Format"
-        assert facets[3]["metadata"]["title"] == "Access"
+        assert facets[3]["metadata"]["title"] == "Accessibility"
         assert facets[4]["metadata"]["title"] == "Sort"
 
         availability_titles = [l["title"] for l in facets[0]["links"]]
@@ -825,7 +825,7 @@ class TestFacetCountsAndBuilder:
         assert parsed.get("query") == ["fox"]
         assert parsed.get("language") is None
 
-        # Check Access facet
+        # Check Accessibility facet
         for link in facets[3]["links"]:
             assert link["type"] == "application/opds+json"
             assert "title" in link

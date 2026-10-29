@@ -1164,7 +1164,7 @@ class TestFacetBuilders:
         assert facets[0]["metadata"]["title"] == "Access"
         assert facets[1]["metadata"]["title"] == "Language"
         assert facets[2]["metadata"]["title"] == "Format"
-        assert facets[3]["metadata"]["title"] == "Access"
+        assert facets[3]["metadata"]["title"] == "Accessibility"
 
     def test_build_facets_availability_links_titles(self):
         facets = build_facets(base_url="https://example.org/opds", query="cats")
@@ -1219,7 +1219,7 @@ class TestFacetBuilders:
         assert facets[0]["metadata"]["title"] == "Access"
         assert facets[1]["metadata"]["title"] == "Language"
         assert facets[2]["metadata"]["title"] == "Format"
-        assert facets[3]["metadata"]["title"] == "Access"
+        assert facets[3]["metadata"]["title"] == "Accessibility"
 
     def test_build_home_facets_uses_home_labels(self):
         facets = OpenLibraryDataProvider.build_home_facets(base_url="https://example.org/opds", mode="everything")

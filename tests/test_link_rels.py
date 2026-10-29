@@ -33,13 +33,12 @@ from pyopds2_openlibrary import (
 
 OPTIONS = [(None, "All"), ("en", "English"), ("fr", "French")]
 
-# The groups in order, by title and relation. A list, not a dict keyed by
-# title: availability and print disability are both titled Access.
+# The groups in order, by title and relation.
 GROUP_RELS = [
     ("Access", REL_FACET_AVAILABILITY),
     ("Language", REL_FACET_LANGUAGE),
     ("Format", REL_FACET_MEDIA_TYPE),
-    ("Access", REL_FACET_ACCESS),
+    ("Accessibility", REL_FACET_ACCESS),
 ]
 
 

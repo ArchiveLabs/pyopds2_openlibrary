@@ -2343,7 +2343,7 @@ def _build_media_type_links(
     return links
 
 
-# Access options for the Access facet group (OPDS 2.0 §2.4).
+# Access options for the Accessibility facet group (OPDS 2.0 §2.4).
 # "general" (default) hides print-disabled content; "print_disabled" shows only that content.
 _ACCESS_OPTIONS: list[tuple[str, str]] = [
     ("general",        "General"),
@@ -2770,7 +2770,7 @@ class OpenLibraryDataProvider(DataProvider):
                 ),
             },
             {
-                "metadata": {"title": "Access"},
+                "metadata": {"title": "Accessibility"},
                 "links": _build_access_links(
                     access=access,
                     href_fn=lambda ac: search_href(ac_val=ac),
@@ -2879,7 +2879,7 @@ class OpenLibraryDataProvider(DataProvider):
                 ),
             },
             {
-                "metadata": {"title": "Access"},
+                "metadata": {"title": "Accessibility"},
                 "links": _build_access_links(
                     access=access,
                     href_fn=ac_href,
@@ -2961,7 +2961,7 @@ class OpenLibraryDataProvider(DataProvider):
                 ),
             },
             {
-                "metadata": {"title": "Access"},
+                "metadata": {"title": "Accessibility"},
                 "links": _build_access_links(
                     access=access,
                     href_fn=lambda ac: author_href(ac_val=ac),
