@@ -591,6 +591,23 @@ class TestWorkRoute:
         editions = [l for l in dumped["links"] if l.get("properties", {}).get("edition")]
         assert [l["title"] for l in editions] == ["Free one"]
 
+    def test_the_record_and_the_editions_go_out_together(self):
+        import threading
+        both = threading.Barrier(2, timeout=2)
+
+        def fetch_work(*_):
+            both.wait()
+            return None
+
+        def editions(*_):
+            both.wait()
+            return []
+
+        with patch.object(openlibrary.OpenLibraryDataProvider, "fetch_work", side_effect=fetch_work), \
+             patch.object(openlibrary, "editions_of_work", side_effect=editions):
+            # One after the other, the first would wait at the barrier alone and break it.
+            assert openlibrary.OpenLibraryDataProvider.work("OL60149W", "en") is None
+
     def test_no_such_work_is_none(self):
         with patch.object(openlibrary, "_get") as mock_get:
             mock_get.return_value.json.return_value = {"docs": []}

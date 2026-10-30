@@ -3307,11 +3307,18 @@ class OpenLibraryDataProvider(DataProvider):
         again shows the same one. An edition the work does not have, or that
         offers nothing, is ignored and the best leads. With *media_type*
         ``audiobook`` only its recordings are listed."""
-        record = OpenLibraryDataProvider.fetch_work(work_olid, language)
-        if record is None:
-            return None
+        from concurrent.futures import ThreadPoolExecutor
+
         media_type = canonical_media_type(media_type)
-        editions = editions_of_work(work_olid, language, access, media_type)
+        # Both need only the OLID, so they go out together: the work's own
+        # record and its editions were two round trips one after the other.
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            pending_record = pool.submit(OpenLibraryDataProvider.fetch_work, work_olid, language)
+            pending_editions = pool.submit(editions_of_work, work_olid, language, access, media_type)
+            record = pending_record.result()
+            if record is None:
+                return None
+            editions = pending_editions.result()
         lead = pinned_edition(work_olid, edition, editions) if edition else None
         if lead is not None:
             editions = [lead, *(e for e in editions if e.key != lead.key)]
