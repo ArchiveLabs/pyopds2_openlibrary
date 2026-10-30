@@ -87,6 +87,14 @@ _EBOOK_ACCESS_CLAUSE_RE = _re.compile(r'\s*ebook_access:(?:\[[^\]]*\]|\S+)')
 # slow Open Library filled the pool and every other request failed waiting.
 _REQUEST_TIMEOUT: float = 10.0
 
+# Connections the shared client may hold to Open Library at once, per process.
+# The app serves each page from a thread pool of 40 and a home page fans out
+# to every carousel at once, so at 20 the pool, not the thread pool, was the
+# narrowest point: a slow spell upstream filled it and unrelated single-request
+# pages failed waiting for a slot. 64 covers the thread pool with fan-out room.
+_MAX_CONNECTIONS: int = 64
+_MAX_KEEPALIVE_CONNECTIONS: int = 32
+
 # HTTP status codes that indicate a transient server-side failure worth retrying.
 _RETRY_STATUS_CODES: frozenset[int] = frozenset({429, 500, 502, 503, 504})
 # Default delays between attempts (seconds): 3 total attempts — immediate, +0.25 s,
@@ -127,8 +135,8 @@ def _get_http_client() -> httpx.Client:
             if _http_client is None:
                 _http_client = httpx.Client(
                     limits=httpx.Limits(
-                        max_keepalive_connections=10,
-                        max_connections=20,
+                        max_keepalive_connections=_MAX_KEEPALIVE_CONNECTIONS,
+                        max_connections=_MAX_CONNECTIONS,
                         keepalive_expiry=30.0,
                     ),
                     timeout=httpx.Timeout(
