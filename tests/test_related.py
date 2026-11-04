@@ -38,7 +38,7 @@ class TestWorkGenre:
     def test_a_subject_names_a_genre_when_the_genres_words_run_through_it(self):
         assert _genre(["Fiction, fantasy, epic"]) == "Fantasy"
         assert _genre(["Detective and mystery stories"]) is None
-        assert _genre(["Mystery and detective stories, English"]) == "Mystery and Detective Stories"
+        assert _genre(["Mystery and detective stories, English"]) == "Crime and Thrillers"
 
     def test_a_subject_names_only_the_longest_genre_it_does(self):
         # Nineteen Eighty-Four is not a science book.
