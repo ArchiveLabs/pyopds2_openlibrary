@@ -3271,7 +3271,7 @@ class OpenLibraryDataProvider(DataProvider):
         links = [
             Link(rel="self", href=cls._home_page_href(base, mode, language, page, media_type, access), type=media),
             Link(rel="start", href=f"{base}/", type=media),
-            Link(rel="search", href=f"{base}/search{{?query,language,mode,media_type}}", type=media, templated=True),
+            Link(rel="search", href=f"{base}/search{{?query,language,mode,media_type,limit}}", type=media, templated=True),
             cls.bookshelf_link(),
             cls.profile_link(),
         ]
