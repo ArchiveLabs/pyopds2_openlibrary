@@ -807,7 +807,7 @@ class TestFacetCountsAndBuilder:
         assert facets[4]["metadata"]["title"] == "Sort"
 
         availability_titles = [l["title"] for l in facets[0]["links"]]
-        assert availability_titles == ["Everything", "Borrow", "Open Access", "Buy"]
+        assert availability_titles == ["Everything", "Open Access", "Borrow", "Buy"]
 
         access_titles = [l["title"] for l in facets[3]["links"]]
         assert access_titles == ["General", "Print Disabled"]

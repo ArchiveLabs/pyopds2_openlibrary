@@ -2225,10 +2225,11 @@ def _set_facet_rel(link: dict, rel: str, active: bool) -> None:
 
 
 # Single canonical label per mode — used by both build_facets and build_home_facets.
+# In the order the design lists Access: everything, then free, borrow, buy.
 _AVAILABILITY_MODES: list[tuple[str, str]] = [
     ("everything",     "Everything"),
-    ("ebooks",         "Borrow"),
     ("open_access",    "Open Access"),
+    ("ebooks",         "Borrow"),
     ("buyable",        "Buy"),
 ]
 
