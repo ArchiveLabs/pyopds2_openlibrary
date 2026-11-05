@@ -67,12 +67,22 @@ class Subject(BaseModel):
 # richer object form OPDS 2.0 also permits. Widen it to accept Subject objects
 # while keeping plain strings valid, then rebuild the model so the new
 # annotation takes effect.
+class GenreNavigation(Navigation):
+    """A front-page navigation link, which OPDS 2.0 lets carry ``properties``
+    as any link may; a genre's say which of the client's icons draws it
+    (``{"icon": "crime"}``). pyopds2's ``Navigation`` declares none, so
+    ``Catalog.navigation`` is widened below to emit them."""
+    properties: Optional[dict] = None
+
+
 Metadata.model_fields['subject'].annotation = Optional[List[Union[Subject, str]]]
 Metadata.model_rebuild(force=True)
 # Models that embed Metadata compiled their nested serializer against the old
 # ``List[str]`` schema; rebuild them too so they emit Subject objects without
 # Pydantic serialization warnings.
 Publication.model_rebuild(force=True)
+Catalog.model_fields['navigation'].annotation = Optional[List[Union[GenreNavigation, Navigation]]]
+Catalog.model_rebuild(force=True)
 Catalog.model_rebuild(force=True)
 
 
@@ -469,7 +479,7 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
             subjects.append(Subject(
                 name=genre["presentable_name"],
                 scheme=SCHEME_GENRE,
-                code=genre["key"].split("/")[-1],
+                code=genre_code(genre),
                 links=[Link(
                     type="application/opds+json",
                     href=genre_href(
@@ -1084,6 +1094,22 @@ def _names_phrase(words: list[str], phrase: list[str]) -> bool:
     return any(words[i:i + n] == phrase for i in range(len(words) - n + 1))
 
 
+def genre_keys(subject: dict) -> list[str]:
+    """The subject keys a genre searches, bare (``science_fiction``): its
+    ``keys``, or the one ``key`` (``/subjects/art``) an override may give.
+    None for a genre given by ``query`` alone."""
+    if subject.get("keys"):
+        return list(subject["keys"])
+    if subject.get("key"):
+        return [subject["key"].split("/")[-1]]
+    return []
+
+
+def genre_code(subject: dict) -> str:
+    """The genre's own name: its ``code``, else its first subject key."""
+    return subject.get("code") or genre_keys(subject)[0]
+
+
 def genre_href(
     search_url: str,
     subject: dict[str, str],
@@ -1094,8 +1120,10 @@ def genre_href(
     """A genre's feed, the trending books of one ``FEATURED_SUBJECTS``
     entry: what the front page's navigation links, and a work's Popular in
     shelf with it."""
+    keys = genre_keys(subject)
+    clause = keys[0] if len(keys) == 1 else f'({" OR ".join(keys)})'
     q = subject.get("query") or (
-        f'subject_key:{subject["key"].split("/")[-1]}'
+        f'subject_key:{clause}'
         f' -subject:"content_warning:cover"'
         f' ebook_access:[borrowable TO *]'
     )
@@ -1124,21 +1152,27 @@ def work_genre(subjects: Optional[list[str]]) -> Optional[dict[str, str]]:
     relevance, and an exact "History" sat 92nd of Moby-Dick's 97 while three
     of them said fiction, historical. Only genres with a ``key`` qualify;
     Standard Ebooks is a publisher, not a subject."""
-    genres = [
-        (s, _words(s["key"].split("/")[-1].replace("_", " ")))
-        for s in OpenLibraryDataProvider.FEATURED_SUBJECTS
-        if s.get("key")
+    genres = [s for s in OpenLibraryDataProvider.FEATURED_SUBJECTS if genre_keys(s)]
+    # Every subject key is a phrase of its genre's: "science fiction" and
+    # "fantasy" both name Sci-fi and fantasy.
+    phrases = [
+        (g, _words(key.replace("_", " ")))
+        for g, s in enumerate(genres)
+        for key in genre_keys(s)
     ]
     counts = [0] * len(genres)
     for name in subjects or []:
         words = _words(name)
-        named = [i for i, (_, phrase) in enumerate(genres) if _names_phrase(words, phrase)]
+        named = [p for p, (_, phrase) in enumerate(phrases) if _names_phrase(words, phrase)]
+        hit = set()
         for i in named:
-            longer = any(j != i and len(genres[j][1]) > len(genres[i][1]) and _names_phrase(genres[j][1], genres[i][1]) for j in named)
+            longer = any(j != i and len(phrases[j][1]) > len(phrases[i][1]) and _names_phrase(phrases[j][1], phrases[i][1]) for j in named)
             if not longer:
-                counts[i] += 1
+                hit.add(phrases[i][0])
+        for g in hit:
+            counts[g] += 1
     best = max(range(len(genres)), key=lambda i: (counts[i], -i), default=None)
-    return genres[best][0] if best is not None and counts[best] > 0 else None
+    return genres[best] if best is not None and counts[best] > 0 else None
 
 
 def related_links(
@@ -2992,23 +3026,21 @@ class OpenLibraryDataProvider(DataProvider):
 
     OPDS_MEDIA_TYPE: str = "application/opds+json"
 
-    FEATURED_SUBJECTS: list[dict[str, str]] = [
-        {"key": "/subjects/art",                           "presentable_name": "Art"},
-        {"key": "/subjects/science_fiction",               "presentable_name": "Science Fiction"},
-        {"key": "/subjects/fantasy",                       "presentable_name": "Fantasy"},
-        {"key": "/subjects/biographies",                   "presentable_name": "Biography"},
-        {"key": "/subjects/recipes",                       "presentable_name": "Cookbooks"},
-        {"key": "/subjects/romance",                       "presentable_name": "Romance"},
-        {"key": "/subjects/textbooks",                     "presentable_name": "Textbooks"},
-        {"key": "/subjects/children",                      "presentable_name": "Children’s books"},
-        {"key": "/subjects/history",                       "presentable_name": "History"},
-        {"key": "/subjects/medicine",                      "presentable_name": "Medicine"},
-        {"key": "/subjects/religion",                      "presentable_name": "Religion"},
-        {"key": "/subjects/mystery_and_detective_stories", "presentable_name": "Crime and Thrillers"},
-        {"key": "/subjects/plays",                         "presentable_name": "Plays"},
-        {"key": "/subjects/music",                         "presentable_name": "Music"},
-        {"key": "/subjects/science",                       "presentable_name": "Science"},
-        {"presentable_name": "Standard Ebooks",            "query": 'publisher:"Standard Ebooks" ebook_access:public'},
+    # The genres, in the order the front page lists them: the design's ten.
+    # Each searches the subject keys it names, and says which of the
+    # client's icons it is drawn with (``icon``, on its navigation link).
+    # ``code`` is the genre's own name, a work's genre subject's ``code``.
+    FEATURED_SUBJECTS: list[dict] = [
+        {"code": "crime",     "keys": ["mystery_and_detective_stories", "thriller", "thrillers"], "presentable_name": "Crime and thrillers", "icon": "crime"},
+        {"code": "sci-fi",    "keys": ["science_fiction", "fantasy"],   "presentable_name": "Sci-fi and fantasy",     "icon": "sci-fi"},
+        {"code": "romance",   "keys": ["romance"],                      "presentable_name": "Romance",                "icon": "romance"},
+        {"code": "children",  "keys": ["children"],                     "presentable_name": "Children’s books",       "icon": "children"},
+        {"code": "biography", "keys": ["biographies"],                  "presentable_name": "Biography",              "icon": "biography"},
+        {"code": "history",   "keys": ["history"],                      "presentable_name": "History",                "icon": "history"},
+        {"code": "arts",      "keys": ["art", "music"],                 "presentable_name": "Arts",                   "icon": "arts"},
+        {"code": "religion",  "keys": ["religion"],                     "presentable_name": "Religion",               "icon": "religion"},
+        {"code": "cookbooks", "keys": ["recipes", "cooking"],           "presentable_name": "Cookbooks",              "icon": "cookbooks"},
+        {"code": "science",   "keys": ["science", "textbooks"],         "presentable_name": "Science and education",  "icon": "science"},
     ]
 
     @staticmethod
@@ -3227,16 +3259,12 @@ class OpenLibraryDataProvider(DataProvider):
         # Navigation — only on page 1 when groups loaded
         navigation: list[Navigation] = []
         if page == 1 and loaded_groups:
-            # Standard Ebooks is English-only; hide its nav link for other languages.
-            visible_subjects = [
-                s for s in subjects
-                if s.get("presentable_name") != "Standard Ebooks" or _is_english_or_all(language)
-            ]
-            for subject in visible_subjects:
-                navigation.append(Navigation(
+            for subject in subjects:
+                navigation.append(GenreNavigation(
                     type=media,
                     title=subject["presentable_name"],
                     href=genre_href(search_url, subject, mode, language, media_type),
+                    properties={"icon": subject["icon"]} if subject.get("icon") else None,
                 ))
 
         # Links
