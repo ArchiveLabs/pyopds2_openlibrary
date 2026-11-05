@@ -2768,13 +2768,14 @@ class OpenLibraryDataProvider(DataProvider):
             mt_val: Optional[str] = media_type,
             ac_val: Optional[str] = access,
         ) -> str:
-            # Strip ebook_access filters from the query for "everything" mode
-            # so the facet link truly returns all results regardless of how
-            # the user arrived at the search page.
-            # Handles both simple values (ebook_access:public) and range
-            # queries (ebook_access:[borrowable TO *]).
-            q = _EBOOK_ACCESS_CLAUSE_RE.sub('', query).strip() if mode_val == "everything" else query
-            params: dict[str, str] = {"query": q}
+            # The query as the page was asked for, in every link: search()
+            # strips any ebook_access clause from it and applies the mode's
+            # own ("mode wins"), so Everything returns everything whatever
+            # the query bakes in. Rewriting it here as well made the Access
+            # links vary two parameters, query and mode, where every other
+            # group varies one, and a client reading a group as the one
+            # parameter its links set could not read Access at all.
+            params: dict[str, str] = {"query": query}
             if sort_val:
                 params["sort"] = sort_val
             if mode_val and mode_val != "everything":

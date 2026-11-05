@@ -889,15 +889,33 @@ class TestFacetCountsAndBuilder:
         parsed_buyable = parse_qs(urlparse(buyable_link["href"]).query)
         assert parsed_buyable.get("mode") == ["buyable"]
 
-    def test_build_facets_everything_strips_ebook_access_filter_from_query(self):
+    def test_build_facets_keeps_the_query_in_every_link(self):
+        # search() strips a baked-in ebook_access clause itself ("mode wins"),
+        # so Everything need not rewrite the query to return everything.
         facets = build_facets(
             base_url="https://example.org/opds",
-            query="cats ebook_access:public",
+            query="cats ebook_access:[borrowable TO *]",
             mode="everything",
+            sort="trending",
+            title="Cats",
         )
-        all_link = next(l for l in facets[0]["links"] if l["title"] == "Everything")
-        parsed_all = parse_qs(urlparse(all_link["href"]).query)
-        assert parsed_all.get("query") == ["cats"]
+        for group in facets:
+            for link in group["links"]:
+                assert parse_qs(urlparse(link["href"]).query)["query"] == ["cats ebook_access:[borrowable TO *]"]
+
+    def test_each_facet_group_varies_one_parameter(self):
+        facets = build_facets(
+            base_url="https://example.org/opds",
+            query="cats ebook_access:[borrowable TO *]",
+            mode="ebooks",
+            sort="trending",
+            title="Cats",
+        )
+        for group in facets:
+            params = [parse_qs(urlparse(l["href"]).query) for l in group["links"]]
+            names = set().union(*params)
+            varying = {n for n in names if len({tuple(p.get(n, [])) for p in params}) > 1}
+            assert len(varying) == 1, (group["metadata"]["title"], varying)
 
 
 class TestSearchModeHandling:
