@@ -270,6 +270,11 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
         """Book price, eg '0.00 USD'"""
         url: Optional[str] = None
         provider_name: Optional[str] = None
+        # The provider's own OPDS publication for this printing (its feed's
+        # ``rel="self"``), recorded by Open Library at harvest; and the
+        # provider's name for readers. Both absent on synthesized rows.
+        source_url: Optional[str] = None
+        feed_name: Optional[str] = None
 
     class EditionAcquisition(BaseModel):
         """One row of Open Library's ``opds_acquisitions``: an OPDS 2.0
@@ -281,6 +286,10 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
         type: Optional[str] = None
         provider_name: Optional[str] = None
         properties: Optional[dict] = None
+        # As on ``EditionProvider``: the harvested feed's ``rel="self"`` for
+        # the publication this row came from, and the feed's display name.
+        source_url: Optional[str] = None
+        feed_name: Optional[str] = None
 
         model_config = {"extra": "allow"}
 
@@ -851,17 +860,59 @@ _EDITION_TIERS = ("public", "borrowable")
 
 class EditionOffer(typing.NamedTuple):
     """The one offer an edition is listed for: its relation, who makes it,
-    its price if it has one, and the loan state if it is a loan."""
+    its price if it has one, the loan state if it is a loan, and the
+    provider's own publication of it and name for itself when Open Library
+    recorded them from the provider's feed."""
     rel: str
     provider_name: Optional[str]
     price: Optional[dict]
     availability: Optional[str]
+    source_url: Optional[str] = None
+    feed_name: Optional[str] = None
 
 
-def distributor_name(provider_name: Optional[str]) -> Optional[str]:
+def distributor_name(provider_name: Optional[str], feed_name: Optional[str] = None) -> Optional[str]:
+    """The feed's own name when Open Library recorded one, else ours for the
+    provider."""
+    if feed_name:
+        return feed_name
     if not provider_name:
         return None
     return _DISTRIBUTOR_NAMES.get(provider_name) or provider_name.replace("_", " ").title()
+
+
+def _source_url(url: Optional[str]) -> Optional[str]:
+    """A recorded source publication, if it is one a client can follow."""
+    return url if isinstance(url, str) and url.startswith("https://") else None
+
+
+# FALLBACK, to be reviewed on 2027-01-06: keep it or remove it?
+#
+# Open Library records each harvested row's ``source_url`` (the feed's
+# ``rel="self"``) since internetarchive/openlibrary#14054, deployed
+# 2026-11-04, but only for rows harvested after that. Until Better World
+# Books is re-harvested its rows have none, so this works the publication's
+# address out of the purchase href as was done before. Remove it once
+# search.json shows ``source_url`` on Better World Books rows; it applies
+# only to a row without one.
+_LEGACY_PROVIDER_PUBLICATIONS: dict[str, tuple["_re.Pattern[str]", str]] = {
+    "betterworldbooks": (
+        _re.compile(r"^https://www\.betterworldbooks\.com/purchase/(\d{13})/?$"),
+        "https://www.betterworldbooks.com/opds/publication/{0}",
+    ),
+}
+
+
+def _row_source(row: "OpenLibraryDataRecord.EditionAcquisition") -> Optional[str]:
+    """The provider's own publication for a row: the ``source_url`` Open
+    Library recorded, else the legacy fallback above."""
+    recorded = _source_url(row.source_url)
+    if recorded:
+        return recorded
+    legacy = _LEGACY_PROVIDER_PUBLICATIONS.get(row.provider_name or "")
+    if legacy is not None and (match := legacy[0].match(row.href)):
+        return legacy[1].format(*match.groups())
+    return None
 
 
 def _availability_state(edition: OpenLibraryDataRecord.EditionDoc) -> Optional[str]:
@@ -910,6 +961,7 @@ def edition_offers(edition: OpenLibraryDataRecord.EditionDoc) -> list[EditionOff
             candidates.append(EditionOffer(
                 row.rel, row.provider_name, _price_in(row.properties),
                 state if row.rel == REL_BORROW else None,
+                _row_source(row), row.feed_name or None,
             ))
     if not candidates and edition.ia and edition.ebook_access in ("public", "borrowable", "printdisabled"):
         rel = REL_OPEN_ACCESS if edition.ebook_access == "public" else REL_BORROW
@@ -923,6 +975,7 @@ def edition_offers(edition: OpenLibraryDataRecord.EditionDoc) -> list[EditionOff
                     candidates.append(EditionOffer(
                         cast(str, link.rel), provider.provider_name, _price_in(link.properties),
                         state if link.rel == REL_BORROW else None,
+                        _source_url(provider.source_url), provider.feed_name or None,
                     ))
     best: dict[Optional[str], EditionOffer] = {}
     for offer in sorted(candidates, key=lambda o: offer_rank(o.rel, o.availability, o.price)):
@@ -942,11 +995,12 @@ def _row_is_served(
     edition whose page offers nothing: LibriVox's catalogue page, which Open
     Library synthesizes as an ``audio/*`` open-access row beside the
     recording the Archive serves (OL33206228M, 2026-10-14). A row that says
-    no type is kept: nothing here knows it is not served."""
+    no type is kept: nothing here knows it is not served. A row that names
+    its provider's own publication (``source_url``) points there, which
+    carries it."""
     if row.provider_name == "ia" and edition.ia:
         return True
-    own = _PROVIDER_PUBLICATIONS.get(row.provider_name or "")
-    if own is not None and own[0].match(row.href):
+    if _row_source(row):
         return True
     media_type = (row.type or "").split(";", 1)[0].strip()
     if media_type.startswith("audio/") or media_type in _AUDIOBOOK_TYPES:
@@ -1001,7 +1055,7 @@ def edition_hint(
         "published": edition_published(edition),
         "language": [iso for marc in (edition.language or []) if (iso := marc_language_to_iso_639_1(marc))] or None,
         "cover": _edition_cover(edition),
-        "distributor": distributor_name(offer.provider_name),
+        "distributor": distributor_name(offer.provider_name, offer.feed_name),
         "offer": {
             "rel": offer.rel,
             **({"price": offer.price} if offer.price else {}),
@@ -1011,47 +1065,20 @@ def edition_hint(
     return {k: v for k, v in hint.items() if v is not None}
 
 
-# A provider that publishes its own OPDS document for a printing, read off
-# the acquisition link Open Library harvested from it: the pattern of that
-# href, and the document's address in terms of what the pattern caught. An
-# offer of theirs points there, so the action is planned from what the
-# provider says. If the document does not answer, the app names the provider
-# as the problem; nothing here stands in for it.
-#
-# The href, not the printing's ISBN: ``editions.isbn`` beside the acquisition
-# fields makes search.json answer 500, and undotted ``isbn`` brings the
-# work's every ISBN into each result (measured 2026-10-12).
-_PROVIDER_PUBLICATIONS: dict[str, tuple["_re.Pattern[str]", str]] = {
-    "betterworldbooks": (
-        _re.compile(r"^https://www\.betterworldbooks\.com/purchase/(\d{13})/?$"),
-        "https://www.betterworldbooks.com/opds/publication/{0}",
-    ),
-}
-
-
-def provider_publication(edition: OpenLibraryDataRecord.EditionDoc, offer: EditionOffer) -> Optional[str]:
-    """The provider's own document for this offer, when it publishes one."""
-    pattern = _PROVIDER_PUBLICATIONS.get(offer.provider_name or "")
-    if pattern is None:
-        return None
-    regex, template = pattern
-    for row in edition.opds_acquisitions or []:
-        if row.provider_name == offer.provider_name and row.rel == offer.rel:
-            match = regex.match(row.href)
-            if match:
-                return template.format(*match.groups())
-    return None
-
-
 def edition_target(edition: OpenLibraryDataRecord.EditionDoc, offer: EditionOffer) -> str:
     """Where an offer's alternate points: the Archive's document for a
-    printing the Archive serves, the provider's own for one that publishes
-    it, else the edition document here."""
+    printing the Archive serves, the provider's own publication when Open
+    Library recorded it from the provider's feed (its ``rel="self"``), else
+    the edition document here.
+
+    The provider's document is the one Open Library says, never one worked
+    out from the acquisition href: an offer of theirs points there, so the
+    action is planned from what the provider says, and if the document does
+    not answer the app names the provider as the problem."""
     if edition.ia and offer.provider_name == "ia":
         return _ia_webpub_href(edition.ia[0])
-    own = provider_publication(edition, offer)
-    if own:
-        return own
+    if offer.source_url:
+        return offer.source_url
     opds_base = OpenLibraryDataProvider.OPDS_BASE_URL or f"{OpenLibraryDataProvider.BASE_URL}/opds"
     return f"{opds_base}{edition.key}"
 

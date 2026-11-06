@@ -186,14 +186,16 @@ BWB_PUBLICATION = "https://www.betterworldbooks.com/opds/publication/97817374088
 
 def _brick_house(**overrides):
     """The Brick House Apparent Quarterly, Vol. 1, as Open Library serves it
-    on 2026-10-09: one printing the Archive lends and Better World Books sells."""
+    on 2026-10-09: one printing the Archive lends and Better World Books sells.
+    With the ``source_url`` and ``feed_name`` a harvest records since
+    internetarchive/openlibrary#14054 (2026-11-04)."""
     doc = dict(
         key="/books/OL32926810M", title="The Brick House Apparent Quarterly, Vol. 1",
         ia=["isbn_9781737408802"], ebook_access="borrowable", language=["eng"],
         availability={"status": "borrow_available"},
         opds_acquisitions=[
             _acq(BUY, "https://www.betterworldbooks.com/purchase/9781737408802", type="text/html",
-                 provider_name="betterworldbooks",
+                 provider_name="betterworldbooks", source_url=BWB_PUBLICATION, feed_name="Better World Books",
                  properties={"price": {"value": 1.25, "currency": "USD"},
                              "indirectAcquisition": [{"type": "application/epub+zip"}],
                              "openlibrary_source": "harvested"}),
@@ -209,7 +211,8 @@ class TestOffersPerProvider:
     def test_a_printing_lent_and_sold_is_two_offers_best_first(self):
         assert openlibrary.edition_offers(_brick_house()) == [
             openlibrary.EditionOffer(BORROW, "ia", None, "available"),
-            openlibrary.EditionOffer(BUY, "betterworldbooks", {"value": 1.25, "currency": "USD"}, None),
+            openlibrary.EditionOffer(BUY, "betterworldbooks", {"value": 1.25, "currency": "USD"}, None,
+                                     BWB_PUBLICATION, "Better World Books"),
         ]
 
     def test_one_provider_keeps_its_best_offer_only(self):
@@ -240,11 +243,64 @@ class TestOffersPerProvider:
         assert openlibrary.edition_alternate_links([edition], None) == [
             openlibrary.edition_alternate_link(edition, None)]
 
+    def test_a_better_world_books_row_harvested_without_its_source_falls_back_to_its_purchase_href(self):
+        """Legacy fallback, to be reviewed on 2027-01-06: a row harvested
+        before Open Library recorded ``source_url``."""
+        edition = _brick_house()
+        edition.opds_acquisitions[0].source_url = None
+        links = openlibrary.edition_alternate_links([edition], None)
+        assert links[1].href == BWB_PUBLICATION
+
     def test_a_better_world_books_link_of_another_shape_points_at_the_edition_document(self):
         edition = _brick_house()
+        edition.opds_acquisitions[0].source_url = None
         edition.opds_acquisitions[0].href = "https://www.betterworldbooks.com/product/detail/x"
         links = openlibrary.edition_alternate_links([edition], None)
         assert links[1].href == "https://openlibrary.org/opds/books/OL32926810M"
+
+    def test_the_recorded_source_wins_over_the_legacy_fallback(self):
+        edition = _brick_house()
+        edition.opds_acquisitions[0].source_url = "https://www.betterworldbooks.com/opds/publication/other"
+        links = openlibrary.edition_alternate_links([edition], None)
+        assert links[1].href == "https://www.betterworldbooks.com/opds/publication/other"
+
+    def test_a_source_that_is_not_https_is_not_followed(self):
+        edition = _brick_house()
+        edition.opds_acquisitions[0].href = "https://www.betterworldbooks.com/product/detail/x"
+        edition.opds_acquisitions[0].source_url = "javascript:alert(1)"
+        links = openlibrary.edition_alternate_links([edition], None)
+        assert links[1].href == "https://openlibrary.org/opds/books/OL32926810M"
+
+    def test_a_gutenberg_printing_points_at_its_publication_on_the_gutenberg_feed(self):
+        """Frankenstein as Open Library harvested it from opds-test.pglaf.org
+        (OL62710922M, 2026-11-03), with the ``source_url`` it records since."""
+        source = "https://opds-test.pglaf.org/opds/publications?id=84"
+        edition = _edition(
+            key="/books/OL62710922M", title="Frankenstein; Or, The Modern Prometheus", ebook_access="public",
+            opds_acquisitions=[
+                _acq(OA, "https://www.gutenberg.org/cache/epub/84/pg84-images-3.epub", type="application/epub+zip",
+                     provider_name="project_gutenberg", source_url=source, feed_name="Project Gutenberg",
+                     properties={"openlibrary_source": "harvested"}),
+            ])
+        links = openlibrary.edition_alternate_links([edition], None)
+        assert [(l.rel, l.href) for l in links] == [("alternate", source)]
+        assert links[0].properties["edition"]["distributor"] == "Project Gutenberg"
+        assert "authenticate" not in links[0].properties
+
+    def test_a_harvested_web_page_with_its_source_is_an_offer(self):
+        """The edition document would leave a ``text/html`` read-online row
+        out; the provider's own publication carries it."""
+        edition = _edition(key="/books/OL1M", opds_acquisitions=[
+            _acq(OA, "https://www.gutenberg.org/ebooks/84.html.images", type="text/html",
+                 provider_name="project_gutenberg", source_url="https://opds-test.pglaf.org/opds/publications?id=84")])
+        assert [l.href for l in openlibrary.edition_alternate_links([edition], None)] == [
+            "https://opds-test.pglaf.org/opds/publications?id=84"]
+
+    def test_the_recorded_feed_name_is_the_distributor(self):
+        edition = _edition(key="/books/OL1M", opds_acquisitions=[
+            _acq(OA, "https://x.example/a.epub", type="application/epub+zip",
+                 provider_name="some_feed", feed_name="Some Feed, Inc.")])
+        assert openlibrary.edition_alternate_link(edition, None).properties["edition"]["distributor"] == "Some Feed, Inc."
 
     def test_two_offers_that_would_share_the_edition_document_get_distinct_hrefs(self):
         edition = _edition(key="/books/OL7M", ebook_access="public", opds_acquisitions=[
@@ -306,7 +362,8 @@ class TestOffersTheirDocumentServes:
     def test_the_archives_and_a_providers_own_rows_are_kept_whatever_their_type(self):
         assert openlibrary.edition_offers(_brick_house()) == [
             openlibrary.EditionOffer(BORROW, "ia", None, "available"),
-            openlibrary.EditionOffer(BUY, "betterworldbooks", {"value": 1.25, "currency": "USD"}, None),
+            openlibrary.EditionOffer(BUY, "betterworldbooks", {"value": 1.25, "currency": "USD"}, None,
+                                     BWB_PUBLICATION, "Better World Books"),
         ]
 
 
