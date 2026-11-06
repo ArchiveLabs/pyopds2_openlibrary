@@ -637,6 +637,66 @@ class TestHasAcquisitionOptions:
         assert _has_acquisition_options(record) is True
 
 
+_GUTENBERG_EPUB = "https://www.gutenberg.org/cache/epub/2554/pg2554-images-3.epub"
+
+
+def _gutenberg_record(source: str = "harvested") -> OpenLibraryDataRecord:
+    """OL62710925M as search.json answered it on 2026-11-06: ``providers``
+    says only Gutenberg's web page; the EPUB is in ``opds_acquisitions``."""
+    edition = OpenLibraryDataRecord.EditionDoc(
+        key="/books/OL62710925M",
+        title="Crime and Punishment",
+        ebook_access="public",
+        providers=[
+            OpenLibraryDataRecord.EditionProvider(
+                provider_name="gutenberg", format="web", access="open-access",
+                url="https://www.gutenberg.org/ebooks/2554",
+            ),
+        ],
+        opds_acquisitions=[
+            OpenLibraryDataRecord.EditionAcquisition(
+                rel="http://opds-spec.org/acquisition/open-access",
+                href=_GUTENBERG_EPUB,
+                type="application/epub+zip",
+                provider_name="project_gutenberg",
+                feed_name="Project Gutenberg",
+                properties={"openlibrary_source": source},
+            ),
+        ],
+    )
+    return OpenLibraryDataRecord(
+        key="/works/OL46164005W",
+        title="Crime and Punishment",
+        editions=OpenLibraryDataRecord.EditionsResultSet(docs=[edition]),
+    )
+
+
+class TestHarvestedDownloads:
+    def test_a_harvested_epub_is_an_acquisition_option(self):
+        assert _has_acquisition_options(_gutenberg_record()) is True
+
+    def test_a_synthesized_row_is_not_read_again(self):
+        assert _has_acquisition_options(_gutenberg_record(source="synthesized")) is False
+
+    def test_the_epub_is_among_the_links(self):
+        epubs = [link for link in _gutenberg_record().links() if link.href == _GUTENBERG_EPUB]
+        assert len(epubs) == 1
+        assert epubs[0].rel == "http://opds-spec.org/acquisition/open-access"
+        assert epubs[0].type == "application/epub+zip"
+        assert epubs[0].title == "Project Gutenberg"
+        assert epubs[0].properties["availability"] == "available"
+
+    def test_the_web_page_is_still_not_a_link(self):
+        hrefs = [link.href for link in _gutenberg_record().links()]
+        assert "https://www.gutenberg.org/ebooks/2554" not in hrefs
+
+    def test_scoped_to_another_provider_it_is_left_out(self):
+        hrefs = [link.href for link in _gutenberg_record().links(provider="ia")]
+        assert _GUTENBERG_EPUB not in hrefs
+        hrefs = [link.href for link in _gutenberg_record().links(provider="project_gutenberg")]
+        assert _GUTENBERG_EPUB in hrefs
+
+
 class TestAcquisitionLinkRelFallback:
     def test_access_none_uses_generic_acquisition_rel(self):
         edition = OpenLibraryDataRecord.EditionDoc(key="/books/OL20M", title="Edition")

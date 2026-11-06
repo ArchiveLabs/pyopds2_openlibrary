@@ -385,6 +385,12 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
                     if key not in seen:
                         seen.add(key)
                         links.append(link)
+        if edition:
+            for link in harvested_download_links(edition, provider):
+                key = (link.href, link.type)
+                if key not in seen:
+                    seen.add(key)
+                    links.append(link)
 
         # When no audio link was produced by the edition providers but the work
         # has a LibriVox recording, add the LibriVox catalog page as a fallback.
@@ -1008,6 +1014,54 @@ def _row_is_served(
     if media_type == "text/html" and row.rel != REL_BUY:
         return False
     return True
+
+
+_DOWNLOADABLE_MEDIA_TYPES = frozenset({"application/epub+zip", "application/pdf"})
+
+
+def harvested_download_links(
+    edition: OpenLibraryDataRecord.EditionDoc,
+    provider: Optional[str] = None,
+) -> list[Link]:
+    """The EPUB and PDF files a provider's own feed offers for *edition*, as
+    Open Library harvested them into ``opds_acquisitions``; with *provider*,
+    only that provider's.
+
+    ``providers`` cannot say these. Open Library builds it from an
+    identifier, and for Project Gutenberg that is always the book's web page
+    (``format="web"``), which is not an acquisition. The harvested row is
+    Gutenberg's feed naming the file itself. Without it an edition that came
+    from such a feed had no link at all, and search left it out
+    (OL62710925M, Crime and Punishment, 2026-11-06).
+
+    Harvested rows only: the rows Open Library synthesizes repeat
+    ``providers``, which ``links()`` already reads in its own way (the
+    Archive's as its webpub).
+    """
+    links: list[Link] = []
+    for row in edition.opds_acquisitions or []:
+        if (row.properties or {}).get("openlibrary_source") != "harvested":
+            continue
+        if provider and row.provider_name != provider:
+            continue
+        media_type = (row.type or "").split(";", 1)[0].strip()
+        if media_type not in _DOWNLOADABLE_MEDIA_TYPES:
+            continue
+        if row.rel not in (REL_OPEN_ACCESS, REL_BORROW, REL_BUY):
+            continue
+        properties: dict = {}
+        if row.rel == REL_OPEN_ACCESS:
+            properties["availability"] = "available"
+        if price := _price_in(row.properties):
+            properties["price"] = price
+        links.append(Link(
+            href=row.href,
+            rel=row.rel,
+            type=media_type,
+            title=row.feed_name or row.provider_name,
+            properties=properties or None,
+        ))
+    return links
 
 
 def edition_offer(edition: OpenLibraryDataRecord.EditionDoc) -> Optional[EditionOffer]:
@@ -1865,12 +1919,15 @@ def _has_acquisition_options(record: OpenLibraryDataRecord) -> bool:
     LibriVox fallback in ``links()`` is a plain ``rel=alternate`` catalog page,
     which no OPDS client can acquire or open.  Such an entry must come from the
     edition's own providers (IA webpub, epub/pdf download, or a purchase link)
-    to be servable.
+    to be servable. A file the provider's own feed offers
+    (``harvested_download_links``) is one too.
     """
     edition = record.editions.docs[0] if record.editions and record.editions.docs else None
-    if not edition or not edition.providers:
+    if not edition:
         return False
-    for p in edition.providers:
+    if harvested_download_links(edition):
+        return True
+    for p in edition.providers or []:
         if not p.url:
             continue
         # Any IA provider produces a webpub alternate link.
