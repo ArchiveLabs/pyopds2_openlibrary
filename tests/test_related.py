@@ -36,22 +36,24 @@ class TestWorkGenre:
         ]) == "Romance"
 
     def test_a_subject_names_a_genre_when_the_genres_words_run_through_it(self):
-        assert _genre(["Fiction, fantasy, epic"]) == "Sci-fi and fantasy"
+        assert _genre(["Fiction, fantasy, epic"]) == "Fantasy"
         assert _genre(["Detective and mystery stories"]) is None
         assert _genre(["Mystery and detective stories, English"]) == "Crime and thrillers"
 
     def test_a_subject_names_only_the_longest_genre_it_does(self):
         # Nineteen Eighty-Four is not a science book.
-        assert _genre(["Science fiction", "Fiction, science fiction, general", "Political science"]) == "Sci-fi and fantasy"
+        assert _genre(["Science fiction", "Fiction, science fiction, general", "Political science"]) == "Sci-fi"
 
     def test_a_word_is_not_a_part_of_one(self):
         assert _genre(["Artists", "Prehistory"]) is None
 
     def test_a_tie_goes_to_the_catalogues_order(self):
-        assert _genre(["History", "Science fiction"]) == "Sci-fi and fantasy"
+        assert _genre(["History", "Science fiction"]) == "Sci-fi"
 
     def test_a_genre_is_named_by_any_of_its_subject_keys(self):
-        assert _genre(["Fantasy fiction"]) == "Sci-fi and fantasy"
+        assert _genre(["Fantasy fiction"]) == "Fantasy"
+        assert _genre(["Classic Literature"]) == "Classics"
+        assert _genre(["Classics"]) == "Classics"
         assert _genre(["Cooking, American"]) == "Cookbooks"
         assert _genre(["Thrillers (Fiction)"]) == "Crime and thrillers"
 
@@ -74,13 +76,13 @@ class TestRelatedLinks:
 
     def test_popular_in_is_the_genres_own_front_page_feed(self):
         _, popular = _related(_work().to_work_publication([], "en").links)
-        assert popular.title == "Popular in Sci-fi and fantasy"
+        assert popular.title == "Popular in Sci-fi"
         genre = next(s for s in OpenLibraryDataProvider.FEATURED_SUBJECTS if s["code"] == "sci-fi")
         assert popular.href == openlibrary.genre_href("https://openlibrary.org/opds/search", genre, language="en")
         query = parse_qs(urlsplit(popular.href).query)
         assert query["sort"] == ["trending"]
         assert query["language"] == ["en"]
-        assert query["query"] == ['subject_key:(science_fiction OR fantasy) -subject:"content_warning:cover" ebook_access:[borrowable TO *]']
+        assert query["query"] == ['subject_key:science_fiction -subject:"content_warning:cover" ebook_access:[borrowable TO *]']
 
     def test_no_language_asked_none_carried(self):
         more_by, popular = _related(_work().to_work_publication([]).links)
@@ -89,7 +91,7 @@ class TestRelatedLinks:
 
     def test_a_work_with_no_author_key_has_no_more_by(self):
         links = _related(_work(author_key=None).to_work_publication([]).links)
-        assert [l.title for l in links] == ["Popular in Sci-fi and fantasy"]
+        assert [l.title for l in links] == ["Popular in Sci-fi"]
 
     def test_a_work_in_no_genre_has_no_popular_in(self):
         links = _related(_work(subject=["Whaling"]).to_work_publication([]).links)
@@ -99,7 +101,7 @@ class TestRelatedLinks:
         record = _work()
         record.request_language = "fr"
         links = _related(record.to_publication().links)
-        assert [l.title for l in links] == ["More by Herman Melville", "Popular in Sci-fi and fantasy"]
+        assert [l.title for l in links] == ["More by Herman Melville", "Popular in Sci-fi"]
         assert all("language=fr" in l.href for l in links)
 
     def test_the_service_base_names_the_feeds(self):
@@ -125,7 +127,7 @@ class TestGenreSubject:
         publication = _work().to_work_publication([], "en")
         genre = self._genre_subject(publication)
         assert publication.metadata.subject[0] is genre
-        assert genre.name == "Sci-fi and fantasy"
+        assert genre.name == "Sci-fi"
         assert genre.code == "sci-fi"
 
     def test_it_links_the_same_feed_as_the_popular_in_shelf(self):
@@ -154,16 +156,16 @@ class TestGenreSubject:
         first = dumped["metadata"]["subject"][0]
         assert first["scheme"] == openlibrary.SCHEME_GENRE
         assert first["code"] == "sci-fi"
-        assert first["name"] == "Sci-fi and fantasy"
+        assert first["name"] == "Sci-fi"
 
 
 class TestGenreNavigation:
-    """The front page's genres are the design's ten, each naming the icon
+    """The front page's genres are the design's twelve, each naming the icon
     the client draws it with."""
 
     def test_the_genres_are_the_designs_in_its_order(self):
         assert [s["presentable_name"] for s in OpenLibraryDataProvider.FEATURED_SUBJECTS] == [
-            "Crime and thrillers", "Sci-fi and fantasy", "Romance", "Children’s books",
+            "Crime and thrillers", "Romance", "Fantasy", "Sci-fi", "Children’s books", "Classics",
             "Biography", "History", "Arts", "Religion", "Cookbooks", "Science and education",
         ]
 
@@ -180,3 +182,18 @@ class TestGenreNavigation:
         nav = openlibrary.GenreNavigation(type="application/opds+json", title="Romance", href="https://x", properties={"icon": "romance"})
         dumped = Catalog(metadata=Metadata(title="t"), publications=[], navigation=[nav]).model_dump(mode="json", exclude_none=True)
         assert dumped["navigation"][0]["properties"] == {"icon": "romance"}
+
+    def test_a_genres_link_names_it_by_its_code_and_its_icon(self):
+        fantasy = next(s for s in OpenLibraryDataProvider.FEATURED_SUBJECTS if s["code"] == "fantasy")
+        nav = openlibrary.genre_navigation("https://x/search", fantasy)
+        assert nav.properties == {"code": "fantasy", "icon": "fantasy"}
+        assert nav.title == "Fantasy"
+        assert nav.href == openlibrary.genre_href("https://x/search", fantasy)
+
+    def test_every_genre_has_a_code_of_its_own(self):
+        codes = [s["code"] for s in OpenLibraryDataProvider.FEATURED_SUBJECTS]
+        assert len(set(codes)) == len(codes) == 12
+
+    def test_a_genre_given_by_query_alone_says_no_code(self):
+        nav = openlibrary.genre_navigation("https://x/search", {"presentable_name": "Custom", "query": "publisher:x"})
+        assert nav.properties is None

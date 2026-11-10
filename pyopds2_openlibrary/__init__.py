@@ -1222,6 +1222,30 @@ def genre_href(
     return f"{search_url}?{urlencode(params)}"
 
 
+def genre_navigation(
+    search_url: str,
+    subject: dict,
+    mode: str = "everything",
+    language: Optional[str] = None,
+    media_type: Optional[str] = None,
+) -> "GenreNavigation":
+    """A genre's link on the front page: its feed, titled with its name, and
+    in ``properties`` its ``code`` and the ``icon`` the client draws it with.
+    A genre given by ``query`` alone has no code and says none."""
+    keys = genre_keys(subject)
+    code = subject.get("code") or (keys[0] if keys else None)
+    properties = {
+        **({"code": code} if code else {}),
+        **({"icon": subject["icon"]} if subject.get("icon") else {}),
+    }
+    return GenreNavigation(
+        type="application/opds+json",
+        title=subject["presentable_name"],
+        href=genre_href(search_url, subject, mode, language, media_type),
+        properties=properties or None,
+    )
+
+
 def work_genre(subjects: Optional[list[str]]) -> Optional[dict[str, str]]:
     """The catalogue genre a work is shelved under: the one of
     ``FEATURED_SUBJECTS`` the most of its subjects name, ties to the
@@ -1234,8 +1258,8 @@ def work_genre(subjects: Optional[list[str]]) -> Optional[dict[str, str]]:
     of them said fiction, historical. Only genres with a ``key`` qualify;
     Standard Ebooks is a publisher, not a subject."""
     genres = [s for s in OpenLibraryDataProvider.FEATURED_SUBJECTS if genre_keys(s)]
-    # Every subject key is a phrase of its genre's: "science fiction" and
-    # "fantasy" both name Sci-fi and fantasy.
+    # Every subject key is a phrase of its genre's: "recipes" and "cooking"
+    # both name Cookbooks.
     phrases = [
         (g, _words(key.replace("_", " ")))
         for g, s in enumerate(genres)
@@ -3112,15 +3136,19 @@ class OpenLibraryDataProvider(DataProvider):
 
     OPDS_MEDIA_TYPE: str = "application/opds+json"
 
-    # The genres, in the order the front page lists them: the design's ten.
-    # Each searches the subject keys it names, and says which of the
+    # The genres, in the order the front page lists them: the design's
+    # twelve. Each searches the subject keys it names, and says which of the
     # client's icons it is drawn with (``icon``, on its navigation link).
-    # ``code`` is the genre's own name, a work's genre subject's ``code``.
+    # ``code`` is the genre's own name, a work's genre subject's ``code``,
+    # and is said on the navigation link too, so a client names a genre by
+    # it rather than by its picture.
     FEATURED_SUBJECTS: list[dict] = [
         {"code": "crime",     "keys": ["mystery_and_detective_stories", "thriller", "thrillers"], "presentable_name": "Crime and thrillers", "icon": "crime"},
-        {"code": "sci-fi",    "keys": ["science_fiction", "fantasy"],   "presentable_name": "Sci-fi and fantasy",     "icon": "sci-fi"},
         {"code": "romance",   "keys": ["romance"],                      "presentable_name": "Romance",                "icon": "romance"},
+        {"code": "fantasy",   "keys": ["fantasy"],                      "presentable_name": "Fantasy",                "icon": "fantasy"},
+        {"code": "sci-fi",    "keys": ["science_fiction"],              "presentable_name": "Sci-fi",                 "icon": "sci-fi"},
         {"code": "children",  "keys": ["children"],                     "presentable_name": "Children’s books",       "icon": "children"},
+        {"code": "classics",  "keys": ["classic_literature", "classics"], "presentable_name": "Classics",             "icon": "classics"},
         {"code": "biography", "keys": ["biographies"],                  "presentable_name": "Biography",              "icon": "biography"},
         {"code": "history",   "keys": ["history"],                      "presentable_name": "History",                "icon": "history"},
         {"code": "arts",      "keys": ["art", "music"],                 "presentable_name": "Arts",                   "icon": "arts"},
@@ -3346,12 +3374,7 @@ class OpenLibraryDataProvider(DataProvider):
         navigation: list[Navigation] = []
         if page == 1 and loaded_groups:
             for subject in subjects:
-                navigation.append(GenreNavigation(
-                    type=media,
-                    title=subject["presentable_name"],
-                    href=genre_href(search_url, subject, mode, language, media_type),
-                    properties={"icon": subject["icon"]} if subject.get("icon") else None,
-                ))
+                navigation.append(genre_navigation(search_url, subject, mode, language, media_type))
 
         # Links
         links = [
