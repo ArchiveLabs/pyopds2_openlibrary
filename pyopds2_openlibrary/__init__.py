@@ -1716,8 +1716,10 @@ class GenreAuthor(typing.NamedTuple):
 # How many of a genre's most-read works its authors are drawn from, and how
 # many works an author needs among them to be drawn before an author with
 # one: one book shelved in a genre is not a writer of it (Orwell's Animal
-# Farm in fantasy).
-GENRE_AUTHOR_WINDOW = 200
+# Farm in fantasy). A thousand works name some four hundred authors in
+# fantasy (2026-11-10: 2.7 s, against 2.2 s for 200 and their 104), deep
+# enough for a client to scroll on through pages of them.
+GENRE_AUTHOR_WINDOW = 1000
 GENRE_AUTHOR_MIN_WORKS = 2
 
 
@@ -1778,10 +1780,11 @@ def fetch_genre_authors(subject: dict, language: Optional[str] = None) -> list[G
     return rank_genre_authors(r.json().get("docs", []))
 
 
-def interleave_genre_authors(lists: list[list[GenreAuthor]], limit: int) -> list[GenreAuthor]:
+def interleave_genre_authors(lists: list[list[GenreAuthor]], limit: Optional[int] = None) -> list[GenreAuthor]:
     """Several genres' authors as one list: each genre's next in turn, so a
     big genre does not crowd a small one out, an author already listed
-    skipped, cut at ``limit``."""
+    skipped, cut at ``limit`` (none: all of them)."""
+    limit = limit if limit is not None else sum(len(l) for l in lists)
     out: list[GenreAuthor] = []
     seen: set[str] = set()
     depth = max((len(l) for l in lists), default=0)

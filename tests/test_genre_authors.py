@@ -64,6 +64,11 @@ class TestInterleave:
         a = [GenreAuthor(f"OL{i}A", str(i), 0, 2) for i in range(20)]
         assert len(openlibrary.interleave_genre_authors([a], 12)) == 12
 
+    def test_no_limit_is_every_author(self):
+        a = [GenreAuthor(f"OL{i}A", str(i), 0, 2) for i in range(20)]
+        b = [GenreAuthor(f"OLb{i}A", str(i), 0, 2) for i in range(5)]
+        assert len(openlibrary.interleave_genre_authors([a, b])) == 25
+
     def test_no_genres_no_authors(self):
         assert openlibrary.interleave_genre_authors([], 12) == []
 
