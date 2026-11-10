@@ -242,6 +242,9 @@ class TestHomeFeed:
         assert _query_params(feed["navigation"][0].href)["language"] == "en,fr"
         assert links_by_rel["search"].href == "https://example.org/opds/search{?query,language,mode,media_type,limit}"
         assert links_by_rel["search"].templated is True
+        genre_authors = links_by_rel[openlibrary.REL_GENRE_AUTHORS]
+        assert genre_authors.href == "https://example.org/opds/genres/authors{?genre,language}"
+        assert genre_authors.templated is True
         for group in feed["facets"]:
             for link in group["links"]:
                 if group["metadata"]["title"] != "Language":

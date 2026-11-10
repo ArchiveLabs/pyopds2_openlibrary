@@ -2427,6 +2427,10 @@ REL_PORTRAIT: str = "https://openlibrary.org/opds/rel/portrait"
 # documented on the same page: the subject that is the work's genre, the one
 # of the catalogue's genres its Popular in shelf is drawn from.
 SCHEME_GENRE: str = "https://openlibrary.org/opds/rel/genre"
+# The front page's templated link to the authors the readers of the genres
+# named by ``genre`` (their codes, comma-separated) read: the authors a
+# client offers a new reader to follow.
+REL_GENRE_AUTHORS: str = "https://openlibrary.org/opds/rel/genre/authors"
 
 
 def _set_facet_rel(link: dict, rel: str, active: bool) -> None:
@@ -3484,6 +3488,7 @@ class OpenLibraryDataProvider(DataProvider):
             Link(rel="self", href=cls._home_page_href(base, mode, language, page, media_type, access), type=media),
             Link(rel="start", href=f"{base}/", type=media),
             Link(rel="search", href=f"{base}/search{{?query,language,mode,media_type,limit}}", type=media, templated=True),
+            Link(rel=REL_GENRE_AUTHORS, href=f"{base}/genres/authors{{?genre,language}}", type=media, templated=True),
             cls.bookshelf_link(),
             cls.profile_link(),
         ]
