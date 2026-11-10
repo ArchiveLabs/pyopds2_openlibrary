@@ -1191,6 +1191,18 @@ def genre_code(subject: dict) -> str:
     return subject.get("code") or genre_keys(subject)[0]
 
 
+def genre_query(subject: dict) -> str:
+    """The Solr query of a genre's books: its subject keys, no cover-warned
+    books, and only books that can be had; or the ``query`` it is given."""
+    keys = genre_keys(subject)
+    clause = keys[0] if len(keys) == 1 else f'({" OR ".join(keys)})'
+    return subject.get("query") or (
+        f'subject_key:{clause}'
+        f' -subject:"content_warning:cover"'
+        f' ebook_access:[borrowable TO *]'
+    )
+
+
 def genre_href(
     search_url: str,
     subject: dict[str, str],
@@ -1201,17 +1213,10 @@ def genre_href(
     """A genre's feed, the trending books of one ``FEATURED_SUBJECTS``
     entry: what the front page's navigation links, and a work's Popular in
     shelf with it."""
-    keys = genre_keys(subject)
-    clause = keys[0] if len(keys) == 1 else f'({" OR ".join(keys)})'
-    q = subject.get("query") or (
-        f'subject_key:{clause}'
-        f' -subject:"content_warning:cover"'
-        f' ebook_access:[borrowable TO *]'
-    )
     params: dict[str, str] = {
         "sort": "trending",
         "title": subject["presentable_name"],
-        "query": q,
+        "query": genre_query(subject),
     }
     if mode != "everything":
         params["mode"] = mode
@@ -1695,6 +1700,104 @@ def author_portrait_link(olid: str) -> Link:
         type="image/jpeg",
         rel=REL_PORTRAIT,
     )
+
+
+class GenreAuthor(typing.NamedTuple):
+    """An author a genre's readers read: their key (``OL23919A``), their
+    name, and how much of the genre's reading is theirs (``readers``, the
+    reading-log entries summed over their works in it; ``works``, how many
+    of those works there were)."""
+    key: str
+    name: str
+    readers: int
+    works: int
+
+
+# How many of a genre's most-read works its authors are drawn from, and how
+# many works an author needs among them to be drawn before an author with
+# one: one book shelved in a genre is not a writer of it (Orwell's Animal
+# Farm in fantasy).
+GENRE_AUTHOR_WINDOW = 200
+GENRE_AUTHOR_MIN_WORKS = 2
+
+
+def genre_author_query(subject: dict, language: Optional[str] = None) -> str:
+    """The Solr query of a genre's books as its feed asks for them
+    (``genre_query``), in the reader's languages when they are given."""
+    q = genre_query(subject)
+    lang = _language_solr_clause(language)
+    return f"{q} {lang}" if lang else q
+
+
+def rank_genre_authors(docs: list[dict]) -> list[GenreAuthor]:
+    """A genre's authors, most read first, from its most-read works
+    (search.json docs with ``author_key``, ``author_name`` and
+    ``readinglog_count``).
+
+    A work counts for its first author only: the others are illustrators,
+    translators and editors as often as co-writers. Authors with
+    ``GENRE_AUTHOR_MIN_WORKS`` works among them come before those with
+    fewer, each run ordered by readers summed over their works, ties to the
+    first seen.
+
+    Measured against the alternatives on 2026-11-10: author search by
+    ``top_subjects`` and ``/subjects/*.json``'s authors both rank by how
+    many works an author has, and lead fantasy with Daisy Meadows and Lexy
+    Timms; this leads it with Rowling, Riordan, Martin and Tolkien."""
+    found: dict[str, list] = {}
+    for doc in docs:
+        keys = doc.get("author_key") or []
+        names = doc.get("author_name") or []
+        if not keys or not names:
+            continue
+        key = keys[0]
+        entry = found.setdefault(key, [names[0], 0, 0])
+        entry[1] += int(doc.get("readinglog_count") or 0)
+        entry[2] += 1
+    authors = [GenreAuthor(k, n, r, w) for k, (n, r, w) in found.items()]
+    order = {a.key: i for i, a in enumerate(authors)}
+    return sorted(
+        authors,
+        key=lambda a: (a.works < GENRE_AUTHOR_MIN_WORKS, -a.readers, order[a.key]),
+    )
+
+
+def fetch_genre_authors(subject: dict, language: Optional[str] = None) -> list[GenreAuthor]:
+    """One genre's authors, most read first (``rank_genre_authors``): one
+    search.json for the genre's ``GENRE_AUTHOR_WINDOW`` most-read works.
+    Raises on an upstream failure, as ``_get`` does."""
+    r = _get(
+        f"{OpenLibraryDataProvider.BASE_URL}/search.json",
+        params={
+            "q": genre_author_query(subject, canonical_language(language)),
+            "sort": "readinglog",
+            "fields": "author_key,author_name,readinglog_count",
+            "limit": GENRE_AUTHOR_WINDOW,
+        },
+    )
+    return rank_genre_authors(r.json().get("docs", []))
+
+
+def interleave_genre_authors(lists: list[list[GenreAuthor]], limit: int) -> list[GenreAuthor]:
+    """Several genres' authors as one list: each genre's next in turn, so a
+    big genre does not crowd a small one out, an author already listed
+    skipped, cut at ``limit``."""
+    out: list[GenreAuthor] = []
+    seen: set[str] = set()
+    depth = max((len(l) for l in lists), default=0)
+    for i in range(depth):
+        for authors in lists:
+            if len(out) >= limit:
+                return out
+            if i < len(authors) and authors[i].key not in seen:
+                seen.add(authors[i].key)
+                out.append(authors[i])
+    return out
+
+
+def featured_genre(code: str) -> Optional[dict]:
+    """The ``FEATURED_SUBJECTS`` entry named by ``code``, or None."""
+    return next((s for s in OpenLibraryDataProvider.FEATURED_SUBJECTS if s.get("code") == code), None)
 
 
 def author_photo_links(info: AuthorInfo) -> Optional[List[Link]]:
