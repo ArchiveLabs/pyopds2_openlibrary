@@ -641,6 +641,7 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
             Link(rel="alternate", href=f"{OpenLibraryDataProvider.BASE_URL}{self.key}.json", type="application/json"),
         ]
         links.extend(edition_alternate_links(editions, self.author_name, editions[0].key if pinned and editions else None))
+        links.extend(source_links(editions))
         links.extend(related_links(self.author_name, self.author_key, self.subject, language))
         return Publication(
             metadata=self.work_metadata(editions, language),
@@ -856,6 +857,20 @@ _DISTRIBUTOR_NAMES = {
     "better_world_books": "Better World Books",
     # How Open Library's harvested ``opds_acquisitions`` spell it.
     "betterworldbooks": "Better World Books",
+}
+
+# A provider's own catalogue, for the providers that publish one a client
+# can open: the ``rel="collection"`` link a work carries for each source
+# among its editions. A provider not listed has none (Standard Ebooks'
+# asks for a patron, LibriVox has no feed), and what it offers is listed
+# here and nowhere else.
+_SOURCE_FEEDS = {
+    "ia": "https://archive.org/services/opds",
+    "bwb": "https://www.betterworldbooks.com/opds",
+    "better_world_books": "https://www.betterworldbooks.com/opds",
+    "betterworldbooks": "https://www.betterworldbooks.com/opds",
+    "gutenberg": "https://opds-test.pglaf.org/opds/",
+    "project_gutenberg": "https://opds-test.pglaf.org/opds/",
 }
 
 # The access tiers an edition is asked for, best first. Print-disabled
@@ -1364,6 +1379,26 @@ def edition_alternate_links(
         if link is not None:
             hrefs.add(href)
             links.append(link)
+    return links
+
+
+def source_links(editions: list[OpenLibraryDataRecord.EditionDoc]) -> list[Link]:
+    """A work's ``rel="collection"`` feeds: the catalogue of each source
+    among its editions' offers that publishes one, once each, in the order
+    the offers come. The title is the name the edition's hint gives as its
+    ``distributor``, which is how a client tells whose catalogue it is."""
+    links: list[Link] = []
+    titles: set[str] = set()
+    for edition in editions:
+        if not edition.key:
+            continue
+        for offer in edition_offers(edition):
+            href = _SOURCE_FEEDS.get(offer.provider_name or "")
+            title = distributor_name(offer.provider_name, offer.feed_name)
+            if not href or not title or title in titles:
+                continue
+            titles.add(title)
+            links.append(Link(rel="collection", type="application/opds+json", title=title, href=href))
     return links
 
 

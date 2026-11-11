@@ -740,3 +740,48 @@ class TestPinnedEdition:
         record = OpenLibraryDataRecord.model_validate(_work_doc())
         self_link = next(l for l in record.to_publication().links if l.rel == "self")
         assert self_link.href == "https://openlibrary.org/opds/works/OL60149W?edition=OL1M"
+
+
+def _collections(links):
+    return [(link.title, link.href) for link in links if link.rel == "collection"]
+
+
+class TestSourceLinks:
+    def test_a_source_with_a_catalogue_is_linked_under_the_hints_name(self):
+        edition = _edition(key="/books/OL1M", ia=["x"], ebook_access="public")
+        [link] = openlibrary.source_links([edition])
+        assert (link.rel, link.type) == ("collection", "application/opds+json")
+        assert link.href == "https://archive.org/services/opds"
+        hint = openlibrary.edition_alternate_link(edition).properties["edition"]
+        assert link.title == hint["distributor"] == "Internet Archive"
+
+    def test_a_feeds_own_name_is_the_title_as_it_is_the_hints(self):
+        edition = _edition(key="/books/OL1M", opds_acquisitions=[_acq(
+            BUY, "https://www.betterworldbooks.com/purchase/9780141439518",
+            provider_name="betterworldbooks", feed_name="BWB Shop",
+            source_url="https://www.betterworldbooks.com/opds/publication/9780141439518",
+        )])
+        assert _collections(openlibrary.source_links([edition])) == [
+            ("BWB Shop", "https://www.betterworldbooks.com/opds"),
+        ]
+
+    def test_each_source_is_linked_once(self):
+        editions = [
+            _edition(key="/books/OL1M", ia=["x"], ebook_access="public"),
+            _edition(key="/books/OL2M", ia=["y"], ebook_access="borrowable"),
+        ]
+        assert len(openlibrary.source_links(editions)) == 1
+
+    def test_a_source_with_no_catalogue_is_not_linked(self):
+        edition = _edition(key="/books/OL1M", opds_acquisitions=[_acq(
+            OA, "https://standardebooks.org/ebooks/x.epub",
+            type="application/epub+zip", provider_name="standard_ebooks",
+        )])
+        assert openlibrary.edition_offers(edition)
+        assert openlibrary.source_links([edition]) == []
+
+    def test_a_work_carries_them(self):
+        work = OpenLibraryDataRecord.model_validate({"key": "/works/OL1W", "title": "T"})
+        edition = _edition(key="/books/OL1M", ia=["x"], ebook_access="public")
+        publication = work.to_work_publication([edition])
+        assert _collections(publication.links) == [("Internet Archive", "https://archive.org/services/opds")]
