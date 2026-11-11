@@ -485,7 +485,7 @@ class TestEditionsOfAFeedPage:
         loan = _edition(key="/books/OL1M", ebook_access="borrowable", ia=["howls"], language=["eng"])
         with patch.object(openlibrary, "editions_of_works", return_value={"OL60149W": [free, loan]}) as composed:
             openlibrary.list_editions([record], "en", None, "audiobook")
-        composed.assert_called_once_with(["OL60149W"], "en", None, "audiobook")
+        composed.assert_called_once_with(["OL60149W"], "en", None, "audiobook", None)
         hrefs = [l.href for l in record.to_publication().links if l.properties and "edition" in l.properties]
         assert hrefs == [IA_WEBPUB.format("pb"), IA_WEBPUB.format("howls")]
 
@@ -785,3 +785,99 @@ class TestSourceLinks:
         edition = _edition(key="/books/OL1M", ia=["x"], ebook_access="public")
         publication = work.to_work_publication([edition])
         assert _collections(publication.links) == [("Internet Archive", "https://archive.org/services/opds")]
+
+
+def _standard_ebooks_edition(key="/books/OL37044764M"):
+    return _edition(key=key, title="Wuthering Heights", language=["eng"], ebook_access="public",
+                    id_standard_ebooks=["emily-bronte/wuthering-heights"],
+                    opds_acquisitions=[_acq(OA, "https://standardebooks.org/x.epub",
+                                            type="application/epub+zip", provider_name="standard_ebooks")])
+
+
+class TestPreferredProvider:
+    """``prefer_provider``: a shelf of one provider's books whose cards lead
+    with that provider's printing, where the catalogue would rank an Archive
+    printing of the same work first."""
+
+    def test_a_providers_name_is_kept_and_anything_else_is_no_preference(self):
+        assert openlibrary.canonical_provider("standard_ebooks") == "standard_ebooks"
+        assert openlibrary.canonical_provider(" Standard_Ebooks ") == "standard_ebooks"
+        for junk in (None, "", "standard ebooks", "x:*", "*", "1ia"):
+            assert openlibrary.canonical_provider(junk) is None
+
+    def test_the_providers_printings_are_asked_for_first_by_their_identifier(self):
+        """``edition.ebook_provider:`` is not carried over to the edition
+        query, and the work kept leading with the Archive's printing."""
+        queries = openlibrary._edition_queries("OL21177W", "en,fr", None, None, "standard_ebooks")
+        assert queries == [
+            ("key:/works/OL21177W edition.id_standard_ebooks:* edition.language:eng", "en"),
+            ("key:/works/OL21177W edition.id_standard_ebooks:* edition.language:fre", "fr"),
+            *openlibrary._edition_queries("OL21177W", "en,fr", None),
+        ]
+
+    def test_the_archives_identifier_is_ia(self):
+        q, _ = openlibrary._edition_queries("OL1W", None, None, None, "ia")[0]
+        assert q == "key:/works/OL1W edition.ia:*"
+
+    def test_print_disabled_is_not_given_the_providers_printings(self):
+        assert openlibrary._edition_queries("OL1W", "en", "print_disabled", None, "standard_ebooks") == \
+            openlibrary._edition_queries("OL1W", "en", "print_disabled")
+
+    def test_the_providers_printing_leads_and_is_listed_once(self):
+        se = _standard_ebooks_edition()
+        archive = _edition(key="/books/OL26499912M", language=["eng"], ebook_access="public", ia=["wh"])
+        loan = _edition(key="/books/OL3M", language=["eng"], ebook_access="borrowable", ia=["loan"])
+
+        def answer(url, *, params=None, **_):
+            q = params["q"]
+            if "id_standard_ebooks" in q:
+                found = [se]
+            elif "public" in q:
+                found = [archive, se]  # the work's best public printing; the SE one again for the second work
+            else:
+                found = [loan]
+            docs = [{"key": "/works/OL21177W", "editions": {"docs": [found[0].model_dump(exclude_none=True)]}},
+                    *([{"key": "/works/OL2W", "editions": {"docs": [found[1].model_dump(exclude_none=True)]}}]
+                      if len(found) > 1 else [])]
+            response = type("R", (), {})()
+            response.json = lambda: {"docs": docs}
+            return response
+
+        with patch.object(openlibrary, "_get", side_effect=answer) as mock_get:
+            listed = openlibrary.editions_of_works(["OL21177W", "OL2W"], "en", None, None, "standard_ebooks")
+        assert mock_get.call_count == 3
+        assert [e.key for e in listed["OL21177W"]] == ["/books/OL37044764M", "/books/OL26499912M", "/books/OL3M"]
+        assert [e.key for e in listed["OL2W"]] == ["/books/OL37044764M"]
+
+    def test_a_card_leads_with_the_providers_offer_and_names_its_printing(self):
+        record = OpenLibraryDataRecord.model_validate(_work_doc(key="/works/OL21177W"))
+        record.request_language = "en"
+        record.request_provider = "standard_ebooks"
+        archive = _edition(key="/books/OL26499912M", language=["eng"], ebook_access="public", ia=["wh"])
+        record.listed_editions = [_standard_ebooks_edition(), archive]
+        publication = record.to_publication()
+        editions = [l for l in publication.links if l.properties and "edition" in l.properties]
+        assert [l.properties["edition"]["distributor"] for l in editions] == ["Standard Ebooks", "Internet Archive"]
+        self_link = next(l for l in publication.links if l.rel == "self")
+        assert self_link.href == "https://openlibrary.org/opds/works/OL21177W?language=en&edition=OL37044764M"
+        assert publication.metadata.title == "Wuthering Heights"
+
+    def test_the_providers_sale_leads_although_a_free_printing_ranks_better(self):
+        sale = _edition(key="/books/OL5M", opds_acquisitions=[
+            _acq(BUY, provider_name="kobo", type="text/html", properties={"price": {"value": 3, "currency": "USD"}})])
+        free = _edition(key="/books/OL6M", ebook_access="public", ia=["free"])
+        links = openlibrary.edition_alternate_links([sale, free], None, preferred_provider="kobo")
+        assert [l.properties["edition"]["distributor"] for l in links] == ["Kobo", "Internet Archive"]
+
+    def test_search_composes_with_the_preference_and_its_next_page_keeps_it(self):
+        answer = type("R", (), {})()
+        answer.json = lambda: {"docs": [_work_doc()], "numFound": 60}
+        with patch.object(openlibrary, "_get", return_value=answer), \
+             patch.object(openlibrary, "list_editions") as listing:
+            response = openlibrary.OpenLibraryDataProvider.search(
+                query="ebook_provider:standard_ebooks", limit=25, require_cover=False,
+                prefer_provider="standard_ebooks",
+            )
+        assert listing.call_args.args[4] == "standard_ebooks"
+        assert response.records[0].request_provider == "standard_ebooks"
+        assert response.params["prefer_provider"] == "standard_ebooks"
