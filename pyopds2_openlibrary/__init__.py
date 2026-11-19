@@ -440,7 +440,14 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
             ),
         ]
 
-    def _authors(self) -> Optional[List[Contributor]]:
+    def _authors(self, language: Optional[str] = None) -> Optional[List[Contributor]]:
+        """The work's authors, each linked to their Open Library page and
+        their OPDS page. The OPDS page carries *language* (by default the
+        one the search was made with), so a reader who follows it from a
+        card sees the author's books in the languages they asked for."""
+        if language is None:
+            language = self.request_language
+        query = f"?{urlencode({'language': language})}" if language else ""
         if self.author_name and self.author_key:
             opds_base = OpenLibraryDataProvider.OPDS_BASE_URL or OpenLibraryDataProvider.BASE_URL
             return [
@@ -453,7 +460,7 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
                             rel="author",
                         ),
                         Link(
-                            href=f"{opds_base}/authors/{key}",
+                            href=f"{opds_base}/authors/{key}{query}",
                             type="application/opds+json",
                             rel="author",
                         ),
@@ -606,7 +613,7 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
             type=edition_type(first) if first else self.type,
             title=title or "Untitled",
             subtitle=subtitle,
-            author=self._authors(),
+            author=self._authors(language),
             description=strip_markdown(desc) if desc else None,
             language=languages or None,
             numberOfPages=self.number_of_pages_median,

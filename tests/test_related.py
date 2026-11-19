@@ -115,6 +115,36 @@ class TestRelatedLinks:
         assert popular.href.startswith("http://localhost:8080/search?")
 
 
+class TestAuthorLinks:
+    """A card's OPDS author link carries the reader's languages, so the
+    author's page it opens lists the books in those languages."""
+
+    def _opds_author_href(self, publication):
+        author = publication.metadata.author[0]
+        return next(l.href for l in author.links if l.type == "application/opds+json")
+
+    def test_the_languages_asked_are_carried(self):
+        href = self._opds_author_href(_work().to_work_publication([], "sv,es,fr,en"))
+        assert urlsplit(href).path.endswith("/authors/OL29497A")
+        assert parse_qs(urlsplit(href).query) == {"language": ["sv,es,fr,en"]}
+
+    def test_a_search_results_card_carries_the_searchs_languages(self):
+        record = _work()
+        record.request_language = "fr"
+        href = self._opds_author_href(record.to_publication())
+        assert parse_qs(urlsplit(href).query) == {"language": ["fr"]}
+
+    def test_no_language_asked_none_carried(self):
+        href = self._opds_author_href(_work().to_work_publication([]))
+        assert urlsplit(href).path.endswith("/authors/OL29497A")
+        assert urlsplit(href).query == ""
+
+    def test_the_html_page_takes_no_language(self):
+        author = _work().to_work_publication([], "fr").metadata.author[0]
+        html = next(l.href for l in author.links if l.type == "text/html")
+        assert html == "https://openlibrary.org/authors/OL29497A"
+
+
 class TestGenreSubject:
     """The genre is said as a subject too, marked by its scheme, so a client
     can show it without reading it out of a shelf's title."""
