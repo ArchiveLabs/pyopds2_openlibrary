@@ -404,9 +404,14 @@ class TestComposition:
         for q, _ in openlibrary._edition_queries("OL66554W", "en", None):
             assert " ebook_access:" not in q and " language:" not in q
 
-    def test_print_disabled_asks_for_that_tier_alone(self):
+    def test_print_disabled_adds_that_tier_last(self):
+        """A reader entitled to print-disabled printings is still offered
+        every other one, and those first."""
         assert [q for q, _ in openlibrary._edition_queries("OL1W", "en", "print_disabled")] == [
-            "key:/works/OL1W edition.ebook_access:printdisabled edition.language:eng"]
+            "key:/works/OL1W edition.ebook_access:public edition.language:eng",
+            "key:/works/OL1W edition.ebook_access:borrowable edition.language:eng",
+            "key:/works/OL1W edition.ebook_access:printdisabled edition.language:eng",
+        ]
 
     def test_audiobooks_alone_ask_every_call_for_a_recording(self):
         """The search matched the work on its LibriVox recording; listing
@@ -819,9 +824,10 @@ class TestPreferredProvider:
         q, _ = openlibrary._edition_queries("OL1W", None, None, None, "ia")[0]
         assert q == "key:/works/OL1W edition.ia:*"
 
-    def test_print_disabled_is_not_given_the_providers_printings(self):
-        assert openlibrary._edition_queries("OL1W", "en", "print_disabled", None, "standard_ebooks") == \
-            openlibrary._edition_queries("OL1W", "en", "print_disabled")
+    def test_print_disabled_is_given_the_providers_printings_first(self):
+        queries = openlibrary._edition_queries("OL1W", "en", "print_disabled", None, "standard_ebooks")
+        assert "edition.id_standard_ebooks:*" in queries[0][0]
+        assert queries[1:] == openlibrary._edition_queries("OL1W", "en", "print_disabled")
 
     def test_the_providers_printing_leads_and_is_listed_once(self):
         se = _standard_ebooks_edition()

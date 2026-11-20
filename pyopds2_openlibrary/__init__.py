@@ -888,9 +888,10 @@ _SOURCE_FEEDS = {
 }
 
 # The access tiers an edition is asked for, best first. Print-disabled
-# printings are asked for only under ``access=print_disabled``, as /books
-# serves them.
+# printings are added, last, only under ``access=print_disabled``: the
+# reader who may borrow them still gets every other printing too.
 _EDITION_TIERS = ("public", "borrowable")
+_PRINT_DISABLED_TIERS = (*_EDITION_TIERS, "printdisabled")
 
 # A provider a search may ask to be listed first (``prefer_provider``), as
 # Open Library names it in ``ebook_provider`` and ``provider_name``.
@@ -1479,10 +1480,9 @@ def _edition_queries(
     printings first would be an ebook on an audiobook shelf.
 
     With *prefer_provider* the calls start with one per language for that
-    provider's printings, in any tier but print-disabled's, which a reader
-    asking for those alone is not given."""
+    provider's printings, in any tier."""
     works = _works_clause([work_olids] if isinstance(work_olids, str) else work_olids)
-    tiers = ("printdisabled",) if access == "print_disabled" else _EDITION_TIERS
+    tiers = _PRINT_DISABLED_TIERS if access == "print_disabled" else _EDITION_TIERS
     pairs = [(iso, iso_639_1_to_marc(iso)) for iso in parse_languages(canonical_language(language))]
     pairs = [(iso, marc) for iso, marc in pairs if marc] or [(None, None)]
     # ``edition.``-scoped: a bare ``ebook_access:`` or ``language:`` clause
@@ -1490,7 +1490,7 @@ def _edition_queries(
     # asking a public-domain work for its loans matched nothing at all.
     audio = lists_recordings(media_type)
     scopes = [f"edition.ebook_access:{tier}" for tier in tiers]
-    if prefer_provider and access != "print_disabled":
+    if prefer_provider:
         scopes.insert(0, _provider_edition_clause(prefer_provider))
     queries: list[tuple[str, Optional[str]]] = []
     for scope in scopes:
@@ -2721,7 +2721,7 @@ def _build_access_links(
     """Build the list of access facet link dicts per OPDS 2.0 §2.4.
 
     Two options: 'General' (default, excludes print-disabled) and 'Print Disabled'
-    (shows only print-disabled content). Print-disabled is hidden by default.
+    (includes print-disabled content beside the rest). Print-disabled is hidden by default.
     Every link carries ``REL_FACET_ACCESS``.
     """
     active = access or "general"
@@ -3812,12 +3812,9 @@ class OpenLibraryDataProvider(DataProvider):
             records = [r for r in records if not r.id_librivox]
 
         # Access filter: control print-disabled visibility.
-        # "general" (default) hides print-disabled books; "print_disabled" shows only them.
-        if access == "print_disabled":
-            records = [r for r in records
-                       if _get_edition_ebook_access(r) == "printdisabled"
-                       or r.ebook_access == "printdisabled"]
-        else:
+        # "general" (default) hides print-disabled books; "print_disabled"
+        # keeps them beside every other book, for a reader entitled to them.
+        if access != "print_disabled":
             records = [r for r in records
                        if _get_edition_ebook_access(r) != "printdisabled"
                        and r.ebook_access != "printdisabled"]
@@ -3826,11 +3823,9 @@ class OpenLibraryDataProvider(DataProvider):
         # edition resolution (see _passes_mode), keeping a record that belongs
         # under any of them. Open-access books must never appear under
         # borrow-only filters, and 'buyable' is only testable here.
-        if access != "print_disabled" and modes:
+        if modes:
             records = [r for r in records if any(_passes_mode(r, m) for m in modes)]
             # Sort available books before unavailable, preserving order within each group
-            records.sort(key=lambda r: (0 if _is_currently_available(r) else 1))
-        elif access == "print_disabled":
             records.sort(key=lambda r: (0 if _is_currently_available(r) else 1))
 
         # Set total for buyable after ALL filters — client-side filtering means Solr

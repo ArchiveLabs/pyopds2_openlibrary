@@ -523,6 +523,44 @@ class TestOpenLibraryDataProvider:
         assert get_availability("printdisabled", "borrow_unavailable") == (
             'unavailable', {"rel": "http://opds-spec.org/acquisition/borrow", "availability": {"state": "unavailable"}})
 
+    @patch('pyopds2_openlibrary.fetch_languages_map')
+    @patch('pyopds2_openlibrary._get_http_client')
+    def test_print_disabled_access_adds_those_books_to_the_rest(self, mock_get_client, mock_lang_map):
+        """``access=print_disabled`` is for a reader entitled to those books:
+        it keeps them beside every other book, it does not keep them alone."""
+        mock_client = MagicMock()
+        mock_get_client.return_value = mock_client
+        mock_lang_map.return_value = {"eng": "en"}
+
+        def doc(n, ebook_access):
+            return {
+                "key": f"/works/OL{n}W", "title": f"Book {n}", "cover_i": n,
+                "ebook_access": ebook_access,
+                "editions": {"docs": [{
+                    "key": f"/books/OL{n}M", "title": f"Book {n}", "cover_i": n,
+                    "ebook_access": ebook_access, "ia": [f"ia{n}"],
+                    "availability": {"status": "borrow_available"},
+                    "providers": [{
+                        "url": f"https://example.org/read/{n}", "format": "epub",
+                        "access": "borrow", "provider_name": "ia",
+                    }],
+                }]},
+            }
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"numFound": 3, "docs": [
+            doc(1, "public"), doc(2, "printdisabled"), doc(3, "borrowable"),
+        ]}
+        mock_response.raise_for_status.return_value = None
+        mock_client.get.return_value = mock_response
+
+        with patch('pyopds2_openlibrary.list_editions'):
+            general = OpenLibraryDataProvider.search("any query", require_cover=False)
+            entitled = OpenLibraryDataProvider.search("any query", require_cover=False, access="print_disabled")
+
+        assert [r.key for r in general.records] == ["/works/OL1W", "/works/OL3W"]
+        assert [r.key for r in entitled.records] == ["/works/OL1W", "/works/OL2W", "/works/OL3W"]
+
 
 def _record_with_providers(*providers: OpenLibraryDataRecord.EditionProvider) -> OpenLibraryDataRecord:
     edition = OpenLibraryDataRecord.EditionDoc(
