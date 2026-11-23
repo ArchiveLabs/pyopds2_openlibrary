@@ -2527,6 +2527,10 @@ SCHEME_GENRE: str = "https://openlibrary.org/opds/rel/genre"
 # named by ``genre`` (their codes, comma-separated) read: the authors a
 # client offers a new reader to follow.
 REL_GENRE_AUTHORS: str = "https://openlibrary.org/opds/rel/genre/authors"
+# The front page's templated link to the books of the authors named by
+# ``author`` (their keys, comma-separated), the most read of late first:
+# what a client shows from the authors a reader follows.
+REL_AUTHORS_BOOKS: str = "https://openlibrary.org/opds/rel/authors/books"
 
 
 def _set_facet_rel(link: dict, rel: str, active: bool) -> None:
@@ -3585,6 +3589,7 @@ class OpenLibraryDataProvider(DataProvider):
             Link(rel="start", href=f"{base}/", type=media),
             Link(rel="search", href=f"{base}/search{{?query,language,mode,media_type,limit}}", type=media, templated=True),
             Link(rel=REL_GENRE_AUTHORS, href=f"{base}/genres/authors{{?genre,language}}", type=media, templated=True),
+            Link(rel=REL_AUTHORS_BOOKS, href=f"{base}/authors/books{{?author,language,limit,title}}", type=media, templated=True),
             cls.bookshelf_link(),
             cls.profile_link(),
         ]

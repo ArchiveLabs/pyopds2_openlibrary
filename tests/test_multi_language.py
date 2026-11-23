@@ -245,6 +245,9 @@ class TestHomeFeed:
         genre_authors = links_by_rel[openlibrary.REL_GENRE_AUTHORS]
         assert genre_authors.href == "https://example.org/opds/genres/authors{?genre,language}"
         assert genre_authors.templated is True
+        authors_books = links_by_rel[openlibrary.REL_AUTHORS_BOOKS]
+        assert authors_books.href == "https://example.org/opds/authors/books{?author,language,limit,title}"
+        assert authors_books.templated is True
         for group in feed["facets"]:
             for link in group["links"]:
                 if group["metadata"]["title"] != "Language":
