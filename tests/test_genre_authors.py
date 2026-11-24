@@ -76,15 +76,24 @@ class TestInterleave:
 class TestGenreAuthorQuery:
     def test_it_asks_for_the_genres_books_as_its_feed_does(self):
         fantasy = openlibrary.featured_genre("fantasy")
-        assert openlibrary.genre_author_query(fantasy) == (
-            'subject_key:fantasy -subject:"content_warning:cover" ebook_access:[borrowable TO *]'
+        assert openlibrary.genre_author_query(fantasy) == openlibrary.genre_query(fantasy)
+        assert openlibrary.genre_query(fantasy).startswith('(subject_key:("fantasy" OR "fantasy_fiction" OR ')
+        assert openlibrary.genre_query(fantasy).endswith(
+            ' -subject:"content_warning:cover" ebook_access:[borrowable TO *]'
         )
 
     def test_the_readers_languages_narrow_it(self):
         crime = openlibrary.featured_genre("crime")
         q = openlibrary.genre_author_query(crime, "en,fr")
-        assert q.startswith("subject_key:(mystery_and_detective_stories OR thriller OR thrillers) ")
+        assert q.startswith('subject_key:("crime_fiction" OR "detective_and_mystery_stories" OR ')
         assert q.endswith(" language:(eng OR fre)")
+
+    def test_a_code_is_a_reading_interest_first(self):
+        # True crime is an interest and not a category: its subcategory's books.
+        assert openlibrary.featured_genre("true-crime")["sources"] == ['subject_key:"true_crime"']
+
+    def test_a_categorys_code_names_the_category(self):
+        assert openlibrary.featured_genre("crime-and-thrillers")["presentable_name"] == "Crime and thrillers"
 
     def test_an_unknown_code_is_no_genre(self):
         assert openlibrary.featured_genre("westerns") is None

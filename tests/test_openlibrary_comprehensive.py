@@ -1310,7 +1310,10 @@ class TestHomeFeed:
         assert links_by_rel["next"].href == "https://example.org/opds/?language=en&page=2"
         assert "previous" not in links_by_rel
 
-        assert len(feed["groups"]) == OpenLibraryDataProvider.GROUPS_PER_PAGE
+        # The reading interests lead page one's groups, then the carousels.
+        assert len(feed["groups"]) == OpenLibraryDataProvider.GROUPS_PER_PAGE + 1
+        assert feed["groups"][0].kwargs["metadata"].title == "Reading interests"
+        assert len(feed["groups"][0].kwargs["navigation"]) == 25
         assert len(feed["facets"]) == 4
         assert len(feed["navigation"]) == 2
 
@@ -1388,7 +1391,8 @@ class TestHomeFeed:
             page=1,
         )
 
-        assert len(feed["groups"]) == 2
+        # The reading interests, and the two carousels that came.
+        assert len(feed["groups"]) == 3
 
 
 class TestFacetCounts:

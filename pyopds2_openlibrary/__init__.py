@@ -16,6 +16,13 @@ from pydantic import BaseModel, Field
 
 _logger = _logging.getLogger(__name__)
 
+from pyopds2_openlibrary.browsing import (
+    BROWSE_CATEGORIES,
+    READING_INTERESTS,
+    category as browse_category,
+    reading_interest,
+    subcategory as browse_subcategory,
+)
 from pyopds2 import (
     Catalog,
     DataProvider,
@@ -54,8 +61,9 @@ class Subject(BaseModel):
     Open Library subjects are free-text, not drawn from a controlled
     vocabulary (e.g. Thema), so a subject is a ``name`` and its ``links``.
     The one exception is a work's genre, which is drawn from the catalogue's
-    own list (``FEATURED_SUBJECTS``): it carries ``scheme`` (``SCHEME_GENRE``)
-    and ``code``, the genre's key, so a client can find it among the rest.
+    own list, its browsing categories (``FEATURED_SUBJECTS``): it carries
+    ``scheme`` (``SCHEME_GENRE``) and ``code``, the category's code, so a
+    client can find it among the rest.
     """
     name: str
     scheme: Optional[str] = None
@@ -1227,9 +1235,10 @@ def _names_phrase(words: list[str], phrase: list[str]) -> bool:
 
 
 def genre_keys(subject: dict) -> list[str]:
-    """The subject keys a genre searches, bare (``science_fiction``): its
-    ``keys``, or the one ``key`` (``/subjects/art``) an override may give.
-    None for a genre given by ``query`` alone."""
+    """The subject keys that alone put a book in a genre, bare
+    (``science_fiction``): its ``keys``, or the one ``key``
+    (``/subjects/art``) an override may give. None for a genre given by
+    ``query`` alone."""
     if subject.get("keys"):
         return list(subject["keys"])
     if subject.get("key"):
@@ -1243,12 +1252,18 @@ def genre_code(subject: dict) -> str:
 
 
 def genre_query(subject: dict) -> str:
-    """The Solr query of a genre's books: its subject keys, no cover-warned
-    books, and only books that can be had; or the ``query`` it is given."""
-    keys = genre_keys(subject)
-    clause = keys[0] if len(keys) == 1 else f'({" OR ".join(keys)})'
+    """The Solr query of a genre's books: its source clauses (``sources``,
+    a category's, a subcategory's or a reading interest's) any one of them
+    enough, else its subject keys; no cover-warned books, and only books
+    that can be had. Or the ``query`` it is given."""
+    sources = subject.get("sources")
+    if sources:
+        clause = sources[0] if len(sources) == 1 else f'({" OR ".join(sources)})'
+    else:
+        keys = genre_keys(subject)
+        clause = "subject_key:" + (keys[0] if len(keys) == 1 else f'({" OR ".join(keys)})')
     return subject.get("query") or (
-        f'subject_key:{clause}'
+        f'{clause}'
         f' -subject:"content_warning:cover"'
         f' ebook_access:[borrowable TO *]'
     )
@@ -1263,12 +1278,16 @@ def genre_href(
 ) -> str:
     """A genre's feed, the trending books of one ``FEATURED_SUBJECTS``
     entry: what the front page's navigation links, and a work's Popular in
-    shelf with it."""
-    params: dict[str, str] = {
-        "sort": "trending",
-        "title": subject["presentable_name"],
-        "query": genre_query(subject),
-    }
+    shelf with it. A browsing category, a subcategory and a reading interest
+    are addressed by their codes (``address``: ``category`` and
+    ``subcategory``), and the search makes their query; any other genre
+    carries its title and query."""
+    params: dict[str, str] = {"sort": "trending"}
+    if subject.get("address"):
+        params.update(subject["address"])
+    else:
+        params["title"] = subject["presentable_name"]
+        params["query"] = genre_query(subject)
     if mode != "everything":
         params["mode"] = mode
     if language:
@@ -1302,6 +1321,25 @@ def genre_navigation(
     )
 
 
+def interest_navigation(
+    search_url: str,
+    interest: dict,
+    mode: str = "everything",
+    language: Optional[str] = None,
+    media_type: Optional[str] = None,
+) -> "GenreNavigation":
+    """A reading interest on the front page: a navigation entry marked
+    ``REL_READING_INTEREST``, to its books, titled with its name, and in
+    ``properties`` its ``code`` and the ``icon`` the client draws it with."""
+    return GenreNavigation(
+        type="application/opds+json",
+        rel=REL_READING_INTEREST,
+        title=interest["presentable_name"],
+        href=genre_href(search_url, interest, mode, language, media_type),
+        properties={"code": interest["code"], "icon": interest["icon"]},
+    )
+
+
 def work_genre(subjects: Optional[list[str]]) -> Optional[dict[str, str]]:
     """The catalogue genre a work is shelved under: the one of
     ``FEATURED_SUBJECTS`` the most of its subjects name, ties to the
@@ -1312,10 +1350,11 @@ def work_genre(subjects: Optional[list[str]]) -> Optional[dict[str, str]]:
     Not the first exact match: a work's subjects come in no order of
     relevance, and an exact "History" sat 92nd of Moby-Dick's 97 while three
     of them said fiction, historical. Only genres with a ``key`` qualify;
-    Standard Ebooks is a publisher, not a subject."""
+    Standard Ebooks is a publisher, not a subject. A key that counts only
+    with another (``biography`` and ``history``) names no genre alone."""
     genres = [s for s in OpenLibraryDataProvider.FEATURED_SUBJECTS if genre_keys(s)]
     # Every subject key is a phrase of its genre's: "recipes" and "cooking"
-    # both name Cookbooks.
+    # both name Food and lifestyle.
     phrases = [
         (g, _words(key.replace("_", " ")))
         for g, s in enumerate(genres)
@@ -1892,8 +1931,67 @@ def interleave_genre_authors(lists: list[list[GenreAuthor]], limit: Optional[int
 
 
 def featured_genre(code: str) -> Optional[dict]:
-    """The ``FEATURED_SUBJECTS`` entry named by ``code``, or None."""
-    return next((s for s in OpenLibraryDataProvider.FEATURED_SUBJECTS if s.get("code") == code), None)
+    """What ``code`` names for ``/genres/authors``: a reading interest, else
+    a ``FEATURED_SUBJECTS`` entry (a browsing category), else None."""
+    return reading_interest(code) or next(
+        (s for s in OpenLibraryDataProvider.FEATURED_SUBJECTS if s.get("code") == code), None,
+    )
+
+
+def browse_target(category_code: str, subcategory_code: Optional[str] = None) -> Optional[dict]:
+    """What a search's ``category`` and ``subcategory`` name: the browsing
+    category, or its subcategory, or None for a code it does not have."""
+    if subcategory_code:
+        return browse_subcategory(category_code, subcategory_code)
+    return browse_category(category_code)
+
+
+def category_navigation(
+    search_url: str,
+    category_code: str,
+    subcategory_code: Optional[str] = None,
+    sort: Optional[str] = None,
+    mode: str = "everything",
+    language: Optional[str] = None,
+    media_type: Optional[str] = None,
+    access: Optional[str] = None,
+) -> list[Navigation]:
+    """A category's page's ``navigation``: All, the whole category, then its
+    subcategories, the one shown marked ``self``. Each keeps the page's
+    order, filter and languages, so a reader moves between them and keeps
+    what they chose. None for a category with no subcategories (Classics),
+    and for a code it does not have."""
+    found = browse_category(category_code)
+    if found is None or not found["subcategories"]:
+        return []
+
+    def href(sub: Optional[str]) -> str:
+        params: dict[str, str] = {}
+        if sort:
+            params["sort"] = sort
+        params["category"] = category_code
+        if sub:
+            params["subcategory"] = sub
+        if mode and mode != "everything":
+            params["mode"] = mode
+        if language:
+            params["language"] = language
+        if media_type:
+            params["media_type"] = media_type
+        if access and access != "general":
+            params["access"] = access
+        return f"{search_url}?{urlencode(params)}"
+
+    entries = [(None, "All"), *((s["code"], s["presentable_name"]) for s in found["subcategories"])]
+    return [
+        Navigation(
+            type="application/opds+json",
+            title=title,
+            href=href(code),
+            **({"rel": "self"} if code == (subcategory_code or None) else {}),
+        )
+        for code, title in entries
+    ]
 
 
 def author_photo_links(info: AuthorInfo) -> Optional[List[Link]]:
@@ -2576,6 +2674,10 @@ REL_GENRE_AUTHORS: str = "https://openlibrary.org/opds/rel/genre/authors"
 # ``author`` (their keys, comma-separated), the most read of late first:
 # what a client shows from the authors a reader follows.
 REL_AUTHORS_BOOKS: str = "https://openlibrary.org/opds/rel/authors/books"
+# A navigation entry that is a reading interest: one of what a client asks a
+# new reader to pick, in the front page's Reading interests group. It leads
+# to the interest's books, its category's or its subcategory's.
+REL_READING_INTEREST: str = "https://openlibrary.org/opds/rel/reading-interest"
 
 
 def _set_facet_rel(link: dict, rel: str, active: bool) -> None:
@@ -3099,6 +3201,7 @@ class OpenLibraryDataProvider(DataProvider):
         media_type: Optional[str] = None,
         access: Optional[str] = None,
         language_counts: Optional[dict[str, int]] = None,
+        address: Optional[dict[str, str]] = None,
     ) -> list[dict]:
         """Build OPDS 2.0 facets for availability and language filtering.
 
@@ -3124,6 +3227,9 @@ class OpenLibraryDataProvider(DataProvider):
                 page title instead of falling back to "Search Results".
             total: Unused; kept for callers that pass it.
             availability_counts: ``{mode_value: item_count}`` per OPDS 2.0 §2.4.
+            address: A browsing category's page's ``category`` and
+                ``subcategory``, in every href in place of the query and
+                the title, which the search makes from them.
         """
         language = canonical_language(language)
         mode = canonical_mode(mode)
@@ -3143,7 +3249,7 @@ class OpenLibraryDataProvider(DataProvider):
             # links vary two parameters, query and mode, where every other
             # group varies one, and a client reading a group as the one
             # parameter its links set could not read Access at all.
-            params: dict[str, str] = {"query": query}
+            params: dict[str, str] = dict(address) if address else {"query": query}
             if sort_val:
                 params["sort"] = sort_val
             if mode_val and mode_val != "everything":
@@ -3154,7 +3260,7 @@ class OpenLibraryDataProvider(DataProvider):
                 params["media_type"] = mt_val
             if ac_val and ac_val != "general":
                 params["access"] = ac_val
-            if title:
+            if title and not address:
                 params["title"] = title
             return f"{base_url}/search?{urlencode(params)}"
 
@@ -3396,25 +3502,17 @@ class OpenLibraryDataProvider(DataProvider):
     OPDS_MEDIA_TYPE: str = "application/opds+json"
 
     # The genres, in the order the front page lists them: the design's
-    # twelve. Each searches the subject keys it names, and says which of the
+    # sixteen browsing categories (``browsing.py``). Each searches its source
+    # clauses, offers its subcategories on its page, and says which of the
     # client's icons it is drawn with (``icon``, on its navigation link).
-    # ``code`` is the genre's own name, a work's genre subject's ``code``,
-    # and is said on the navigation link too, so a client names a genre by
-    # it rather than by its picture.
-    FEATURED_SUBJECTS: list[dict] = [
-        {"code": "crime",     "keys": ["mystery_and_detective_stories", "thriller", "thrillers"], "presentable_name": "Crime and thrillers", "icon": "crime"},
-        {"code": "romance",   "keys": ["romance"],                      "presentable_name": "Romance",                "icon": "romance"},
-        {"code": "fantasy",   "keys": ["fantasy"],                      "presentable_name": "Fantasy",                "icon": "fantasy"},
-        {"code": "sci-fi",    "keys": ["science_fiction"],              "presentable_name": "Sci-fi",                 "icon": "sci-fi"},
-        {"code": "children",  "keys": ["children"],                     "presentable_name": "Children’s books",       "icon": "children"},
-        {"code": "classics",  "keys": ["classic_literature", "classics"], "presentable_name": "Classics",             "icon": "classics"},
-        {"code": "biography", "keys": ["biographies"],                  "presentable_name": "Biography",              "icon": "biography"},
-        {"code": "history",   "keys": ["history"],                      "presentable_name": "History",                "icon": "history"},
-        {"code": "arts",      "keys": ["art", "music"],                 "presentable_name": "Arts",                   "icon": "arts"},
-        {"code": "religion",  "keys": ["religion"],                     "presentable_name": "Religion",               "icon": "religion"},
-        {"code": "cookbooks", "keys": ["recipes", "cooking"],           "presentable_name": "Cookbooks",              "icon": "cookbooks"},
-        {"code": "science",   "keys": ["science", "textbooks"],         "presentable_name": "Science and education",  "icon": "science"},
-    ]
+    # ``code`` is the category's own name, a work's genre subject's
+    # ``code``, and is said on the navigation link too, so a client names a
+    # category by it rather than by its picture.
+    FEATURED_SUBJECTS: list[dict] = BROWSE_CATEGORIES
+
+    # What a client asks a new reader to pick: the design's 25 reading
+    # interests, each a category or one of its subcategories.
+    READING_INTERESTS: list[dict] = READING_INTERESTS
 
     @staticmethod
     def _home_groups_config(
@@ -3634,6 +3732,18 @@ class OpenLibraryDataProvider(DataProvider):
         if page == 1 and loaded_groups:
             for subject in subjects:
                 navigation.append(genre_navigation(search_url, subject, mode, language, media_type))
+            # The reading interests lead the page's groups, as a group of
+            # navigation: what a client asks a new reader to pick.
+            loaded_groups = [
+                Catalog(
+                    metadata=Metadata(title="Reading interests"),
+                    navigation=[
+                        interest_navigation(search_url, interest, mode, language, media_type)
+                        for interest in cls.READING_INTERESTS
+                    ],
+                ),
+                *loaded_groups,
+            ]
 
         # Links
         links = [

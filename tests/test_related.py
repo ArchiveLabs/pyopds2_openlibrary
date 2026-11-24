@@ -37,8 +37,10 @@ class TestWorkGenre:
 
     def test_a_subject_names_a_genre_when_the_genres_words_run_through_it(self):
         assert _genre(["Fiction, fantasy, epic"]) == "Fantasy"
-        assert _genre(["Detective and mystery stories"]) is None
-        assert _genre(["Mystery and detective stories, English"]) == "Crime and thrillers"
+        assert _genre(["Detective and mystery stories"]) == "Crime and thrillers"
+        # A source the design took out of its category (it mostly matched
+        # books outside it).
+        assert _genre(["Mystery and detective stories, English"]) is None
 
     def test_a_subject_names_only_the_longest_genre_it_does(self):
         # Nineteen Eighty-Four is not a science book.
@@ -47,15 +49,19 @@ class TestWorkGenre:
     def test_a_word_is_not_a_part_of_one(self):
         assert _genre(["Artists", "Prehistory"]) is None
 
+    def test_a_key_that_counts_only_with_another_names_no_genre(self):
+        # Biography's Women row is biography and women: women alone is not one.
+        assert _genre(["Women"]) is None
+
     def test_a_tie_goes_to_the_catalogues_order(self):
         assert _genre(["History", "Science fiction"]) == "Sci-fi"
 
     def test_a_genre_is_named_by_any_of_its_subject_keys(self):
         assert _genre(["Fantasy fiction"]) == "Fantasy"
         assert _genre(["Classic Literature"]) == "Classics"
-        assert _genre(["Classics"]) == "Classics"
-        assert _genre(["Cooking, American"]) == "Cookbooks"
-        assert _genre(["Thrillers (Fiction)"]) == "Crime and thrillers"
+        assert _genre(["Cooking, American"]) == "Food and lifestyle"
+        assert _genre(["Suspense fiction"]) == "Crime and thrillers"
+        assert _genre(["Space opera", "Fiction, science fiction, space opera"]) == "Sci-fi"
 
     def test_a_work_in_no_genre_has_none(self):
         assert _genre(["Whaling", "Sea stories"]) is None
@@ -80,9 +86,7 @@ class TestRelatedLinks:
         genre = next(s for s in OpenLibraryDataProvider.FEATURED_SUBJECTS if s["code"] == "sci-fi")
         assert popular.href == openlibrary.genre_href("https://openlibrary.org/opds/search", genre, language="en")
         query = parse_qs(urlsplit(popular.href).query)
-        assert query["sort"] == ["trending"]
-        assert query["language"] == ["en"]
-        assert query["query"] == ['subject_key:science_fiction -subject:"content_warning:cover" ebook_access:[borrowable TO *]']
+        assert query == {"sort": ["trending"], "category": ["sci-fi"], "language": ["en"]}
 
     def test_no_language_asked_none_carried(self):
         more_by, popular = _related(_work().to_work_publication([]).links)
@@ -190,22 +194,29 @@ class TestGenreSubject:
 
 
 class TestGenreNavigation:
-    """The front page's genres are the design's twelve, each naming the icon
-    the client draws it with."""
+    """The front page's genres are the design's sixteen browsing categories,
+    each naming the icon the client draws it with."""
 
     def test_the_genres_are_the_designs_in_its_order(self):
         assert [s["presentable_name"] for s in OpenLibraryDataProvider.FEATURED_SUBJECTS] == [
-            "Crime and thrillers", "Romance", "Fantasy", "Sci-fi", "Children’s books", "Classics",
-            "Biography", "History", "Arts", "Religion", "Cookbooks", "Science and education",
+            "Crime and thrillers", "Romance", "Fantasy", "Sci-fi", "Fiction", "Classics",
+            "Children’s books", "Biography", "History", "Philosophy and religion", "Arts and culture",
+            "Health and self-help", "Food and lifestyle", "Business", "Politics and law",
+            "Science and learning",
         ]
 
     def test_every_genre_names_an_icon(self):
         assert all(s.get("icon") for s in OpenLibraryDataProvider.FEATURED_SUBJECTS)
 
-    def test_a_genre_of_one_key_searches_it_bare(self):
+    def test_a_category_is_addressed_by_its_code(self):
         romance = next(s for s in OpenLibraryDataProvider.FEATURED_SUBJECTS if s["code"] == "romance")
-        query = parse_qs(urlsplit(openlibrary.genre_href("https://x/search", romance)).query)["query"][0]
-        assert query.startswith("subject_key:romance ")
+        query = parse_qs(urlsplit(openlibrary.genre_href("https://x/search", romance, language="fr")).query)
+        assert query == {"sort": ["trending"], "category": ["romance"], "language": ["fr"]}
+
+    def test_a_genre_of_one_key_searches_it_bare(self):
+        query = parse_qs(urlsplit(openlibrary.genre_href("https://x/search", {"presentable_name": "Art", "key": "/subjects/art"})).query)
+        assert query["query"][0].startswith("subject_key:art ")
+        assert query["title"] == ["Art"]
 
     def test_the_link_carries_the_icon_in_its_properties(self):
         from pyopds2 import Catalog, Metadata
@@ -216,13 +227,13 @@ class TestGenreNavigation:
     def test_a_genres_link_names_it_by_its_code_and_its_icon(self):
         fantasy = next(s for s in OpenLibraryDataProvider.FEATURED_SUBJECTS if s["code"] == "fantasy")
         nav = openlibrary.genre_navigation("https://x/search", fantasy)
-        assert nav.properties == {"code": "fantasy", "icon": "fantasy"}
+        assert nav.properties == {"code": "fantasy", "icon": "browse-fantasy"}
         assert nav.title == "Fantasy"
         assert nav.href == openlibrary.genre_href("https://x/search", fantasy)
 
     def test_every_genre_has_a_code_of_its_own(self):
         codes = [s["code"] for s in OpenLibraryDataProvider.FEATURED_SUBJECTS]
-        assert len(set(codes)) == len(codes) == 12
+        assert len(set(codes)) == len(codes) == 16
 
     def test_a_genre_given_by_query_alone_says_no_code(self):
         nav = openlibrary.genre_navigation("https://x/search", {"presentable_name": "Custom", "query": "publisher:x"})

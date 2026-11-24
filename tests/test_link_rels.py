@@ -176,7 +176,8 @@ class TestCarouselRels:
         mock_search.side_effect = lambda **kw: _response(**kw)
         with patch("pyopds2_openlibrary.fetch_language_options", return_value=OPTIONS):
             feed = OpenLibraryDataProvider.build_home_feed(base="https://x/opds", page=1)
-        groups = feed["groups"]
+        # The carousels: page one's groups after the reading interests.
+        groups = [g for g in feed["groups"] if g.get("publications")]
         assert [g["metadata"]["title"] for g in groups][0] == "Trending Books"
         for group in groups:
             self_links = [l for l in group["links"] if has_rel(l, "self")]
