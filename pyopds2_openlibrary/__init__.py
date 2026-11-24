@@ -2313,6 +2313,51 @@ def _mode_ebook_access_clause(mode: str) -> str:
     return f"ebook_access:({' OR '.join(values)})"
 
 
+# The edition-level ebook_access values a general-access search asks Open
+# Library to surface, per availability mode: what the reader can have, so
+# never print-disabled. 'buyable' is tested client-side on the edition's
+# providers, so it asks for any edition with an ebook.
+_MODE_EDITION_ACCESS_VALUES: dict[str, tuple[str, ...]] = {
+    "ebooks":         ("borrowable",),
+    "print_disabled": (),
+    "open_access":    ("public",),
+    "buyable":        ("borrowable", "public"),
+}
+
+
+def _edition_scope_clause(
+    mode: str, language: Optional[str], access: Optional[str],
+) -> Optional[str]:
+    """The ``edition.``-scoped Solr clauses that make Open Library give each
+    work an edition the reader can have, or ``None`` for no clause.
+
+    Search returns one edition per work. Without these clauses that edition
+    is often a print-disabled printing, and the general-access post-filter
+    then drops the whole work, even when the work has a borrowable edition.
+    ``edition.ebook_access:`` picks an edition the mode admits, without
+    print-disabled ones; ``edition.language:`` picks one in the reader's
+    languages. Under ``access=print_disabled`` there is no clause: every
+    edition is the reader's to have.
+    """
+    if access == "print_disabled":
+        return None
+    modes = parse_modes(mode)
+    values: list[str] = []
+    for m in modes or ["buyable"]:  # everything admits what buyable does
+        for value in _MODE_EDITION_ACCESS_VALUES[m]:
+            if value not in values:
+                values.append(value)
+    if not values:
+        return None
+    values.sort(key=["borrowable", "public"].index)
+    access_values = values[0] if len(values) == 1 else f"({' OR '.join(values)})"
+    clause = f"edition.ebook_access:{access_values}"
+    language_clause = _language_solr_clause(language)
+    if language_clause:
+        clause = f"{clause} edition.{language_clause}"
+    return clause
+
+
 def _passes_mode(record: "OpenLibraryDataRecord", mode: str) -> bool:
     """Whether a record belongs under one availability mode, after edition
     resolution — the post-filter ``search`` applies, per listed mode.
@@ -2931,6 +2976,13 @@ class OpenLibraryDataProvider(DataProvider):
             clause = _language_solr_clause(language)
             if clause:
                 internal_query = f"{internal_query} {clause}"
+
+        # Count the works that have an edition the reader can have, as
+        # search() asks for them under general access.
+        if "edition_key:" not in query and "edition." not in internal_query:
+            edition_clause = _edition_scope_clause(mode, language, None)
+            if edition_clause:
+                internal_query = f"{internal_query} {edition_clause}"
 
         r = _get(
             f"{OpenLibraryDataProvider.BASE_URL}/search.json",
@@ -3761,6 +3813,14 @@ class OpenLibraryDataProvider(DataProvider):
             clause = _language_solr_clause(language)
             if clause:
                 internal_query = f"{internal_query} {clause}"
+
+        # Ask for an edition the reader can have, so that a work whose first
+        # edition is print-disabled is not dropped by the access filter below.
+        # Not for an edition lookup, which serves the edition it names.
+        if "edition_key:" not in query and "edition." not in internal_query:
+            edition_clause = _edition_scope_clause(mode, language, access)
+            if edition_clause:
+                internal_query = f"{internal_query} {edition_clause}"
 
         params = {
             "editions": "true",
