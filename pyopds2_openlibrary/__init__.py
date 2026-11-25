@@ -1957,10 +1957,12 @@ def category_navigation(
     access: Optional[str] = None,
 ) -> list[Navigation]:
     """A category's page's ``navigation``: All, the whole category, then its
-    subcategories, the one shown marked ``self``. Each keeps the page's
-    order, filter and languages, so a reader moves between them and keeps
-    what they chose. None for a category with no subcategories (Classics),
-    and for a code it does not have."""
+    subcategories, the one shown marked ``self``. All carries ``REL_ALL``,
+    so a client can leave it out and still find where a subcategory
+    unchosen leads. Each keeps the page's order, filter and languages, so a
+    reader moves between them and keeps what they chose. None for a
+    category with no subcategories (Classics), and for a code it does not
+    have."""
     found = browse_category(category_code)
     if found is None or not found["subcategories"]:
         return []
@@ -1982,13 +1984,20 @@ def category_navigation(
             params["access"] = access
         return f"{search_url}?{urlencode(params)}"
 
+    def rel(code: Optional[str]) -> Optional[Union[str, List[str]]]:
+        rels = [
+            *(["self"] if code == (subcategory_code or None) else []),
+            *([REL_ALL] if code is None else []),
+        ]
+        return rels[0] if len(rels) == 1 else (rels or None)
+
     entries = [(None, "All"), *((s["code"], s["presentable_name"]) for s in found["subcategories"])]
     return [
         Navigation(
             type="application/opds+json",
             title=title,
             href=href(code),
-            **({"rel": "self"} if code == (subcategory_code or None) else {}),
+            **({"rel": r} if (r := rel(code)) is not None else {}),
         )
         for code, title in entries
     ]
@@ -2678,6 +2687,10 @@ REL_AUTHORS_BOOKS: str = "https://openlibrary.org/opds/rel/authors/books"
 # new reader to pick, in the front page's Reading interests group. It leads
 # to the interest's books, its category's or its subcategory's.
 REL_READING_INTEREST: str = "https://openlibrary.org/opds/rel/reading-interest"
+# The navigation entry that is the whole of what the others narrow: a
+# category's All, beside its subcategories. A client may draw the others as
+# choices with none chosen, and lead here when the chosen one is unchosen.
+REL_ALL: str = "https://openlibrary.org/opds/rel/all"
 
 
 def _set_facet_rel(link: dict, rel: str, active: bool) -> None:

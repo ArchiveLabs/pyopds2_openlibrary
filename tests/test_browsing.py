@@ -105,13 +105,17 @@ class TestCategoryNavigation:
     def test_all_then_the_subcategories_the_one_shown_marked_self(self):
         nav = openlibrary.category_navigation("https://x/search", "sci-fi", "space-opera", sort="trending")
         assert [n.title for n in nav] == ["All", "Space opera", "Hard sci-fi"]
-        assert [n.rel for n in nav] == [None, "self", None]
+        assert [n.rel for n in nav] == [openlibrary.REL_ALL, "self", None]
         assert _query(nav[0].href) == {"sort": ["trending"], "category": ["sci-fi"]}
         assert _query(nav[2].href) == {"sort": ["trending"], "category": ["sci-fi"], "subcategory": ["hard-sci-fi"]}
 
     def test_all_is_self_on_the_category(self):
         nav = openlibrary.category_navigation("https://x/search", "sci-fi")
-        assert nav[0].rel == "self"
+        assert nav[0].rel == ["self", openlibrary.REL_ALL]
+        assert all(n.rel is None for n in nav[1:])
+
+    def test_all_says_what_it_is(self):
+        assert openlibrary.REL_ALL == "https://openlibrary.org/opds/rel/all"
 
     def test_each_keeps_the_pages_order_filter_and_languages(self):
         nav = openlibrary.category_navigation(
