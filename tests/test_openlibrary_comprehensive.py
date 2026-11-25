@@ -1313,7 +1313,7 @@ class TestHomeFeed:
         # The reading interests lead page one's groups, then the carousels.
         assert len(feed["groups"]) == OpenLibraryDataProvider.GROUPS_PER_PAGE + 1
         assert feed["groups"][0].kwargs["metadata"].title == "Reading interests"
-        assert len(feed["groups"][0].kwargs["navigation"]) == 25
+        assert len(feed["groups"][0].kwargs["navigation"]) == 26
         assert len(feed["facets"]) == 4
         assert len(feed["navigation"]) == 2
 

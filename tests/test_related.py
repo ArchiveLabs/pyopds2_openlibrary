@@ -194,13 +194,13 @@ class TestGenreSubject:
 
 
 class TestGenreNavigation:
-    """The front page's genres are the design's sixteen browsing categories,
+    """The front page's genres are the design's seventeen browsing categories,
     each naming the icon the client draws it with."""
 
     def test_the_genres_are_the_designs_in_its_order(self):
         assert [s["presentable_name"] for s in OpenLibraryDataProvider.FEATURED_SUBJECTS] == [
             "Crime and thrillers", "Romance", "Fantasy", "Sci-fi", "Fiction", "Classics",
-            "Children’s books", "Biography", "History", "Philosophy and religion", "Arts and culture",
+            "Children’s books", "Humor", "Biography", "History", "Philosophy and religion", "Arts",
             "Health and self-help", "Food and lifestyle", "Business", "Politics and law",
             "Science and learning",
         ]
@@ -233,7 +233,7 @@ class TestGenreNavigation:
 
     def test_every_genre_has_a_code_of_its_own(self):
         codes = [s["code"] for s in OpenLibraryDataProvider.FEATURED_SUBJECTS]
-        assert len(set(codes)) == len(codes) == 16
+        assert len(set(codes)) == len(codes) == 17
 
     def test_a_genre_given_by_query_alone_says_no_code(self):
         nav = openlibrary.genre_navigation("https://x/search", {"presentable_name": "Custom", "query": "publisher:x"})

@@ -3515,7 +3515,7 @@ class OpenLibraryDataProvider(DataProvider):
     OPDS_MEDIA_TYPE: str = "application/opds+json"
 
     # The genres, in the order the front page lists them: the design's
-    # sixteen browsing categories (``browsing.py``). Each searches its source
+    # seventeen browsing categories (``browsing.py``). Each searches its source
     # clauses, offers its subcategories on its page, and says which of the
     # client's icons it is drawn with (``icon``, on its navigation link).
     # ``code`` is the category's own name, a work's genre subject's
@@ -3523,7 +3523,7 @@ class OpenLibraryDataProvider(DataProvider):
     # category by it rather than by its picture.
     FEATURED_SUBJECTS: list[dict] = BROWSE_CATEGORIES
 
-    # What a client asks a new reader to pick: the design's 25 reading
+    # What a client asks a new reader to pick: the design's 26 reading
     # interests, each a category or one of its subcategories.
     READING_INTERESTS: list[dict] = READING_INTERESTS
 

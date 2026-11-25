@@ -3,15 +3,18 @@ lists to browse, what a category's page offers as its subcategories, and
 what a new reader is asked to pick.
 
 The source is the design's "Open books browsing and reading interests" of
-23 November 2026: 16 categories, 96 visible subcategories and 15 hidden
-source rows, and 25 interests. A category's books are all its rows together
+24 November 2026: 17 categories, 95 visible subcategories and 15 hidden
+source rows, and 26 interests. A category's books are all its rows together
 (OR), the hidden ones included; a subcategory's are its own row; an
 interest's are the one category or the one subcategory it names.
 
 Each row is a complete Solr clause as the design gives it, conditions and
 all (``subject_key:("biography" AND "history")``): it is never taken apart,
-only joined to the others with OR. The availability and language filters
-are added after, to the whole, by the code that searches.
+only joined to the others with OR. In a non-fiction category, each row
+also leaves out the books tagged as fiction (``NOT_FICTION``), except the
+rows of a literary form (Poetry and Theater under Arts). The availability
+and language filters are added after, to the whole, by the code that
+searches.
 """
 
 from __future__ import annotations
@@ -22,6 +25,19 @@ from typing import Optional
 # One row of a category: the code and label of the subcategory it is, or
 # None for a hidden row, which only adds to the category's own books.
 _Row = tuple[Optional[str], Optional[str], str]
+
+# What a non-fiction row leaves out. Open Library splits a heading such as
+# "Spain -- Politics and government -- Fiction" into separate subjects, so a
+# novel carries the subjects of a non-fiction category too.
+NOT_FICTION = 'NOT subject_key:("children\'s_fiction" OR "fiction" OR "juvenile_fiction")'
+
+# The categories whose rows leave out fiction, and in them the rows of a
+# literary form, which do not.
+_NON_FICTION = {
+    "biography", "history", "philosophy-and-religion", "arts", "health-and-self-help",
+    "food-and-lifestyle", "business", "politics-and-law", "science-and-learning",
+}
+_LITERARY_FORMS = {("arts", "poetry"), ("arts", "theater")}
 
 
 def _key(*keys: str) -> str:
@@ -90,6 +106,10 @@ _CATEGORIES: list[tuple[str, str, list[_Row]]] = [
         ("bedtime", "Bedtime", _key("bedtime")),
         ("picture-books", "Picture books", _key("picture_books")),
         ("nonfiction", "Nonfiction", _key("juvenile_nonfiction")),
+        ("funny", "Funny", _all("children's_fiction", "humorous_stories")),
+    ]),
+    ("humor", "Humor", [
+        (None, None, _key("humor")),
     ]),
     ("biography", "Biography", [
         (None, None, _key("biographies", "biography", "biography__autobiography")),
@@ -125,7 +145,7 @@ _CATEGORIES: list[tuple[str, str, list[_Row]]] = [
         ("hinduism", "Hinduism", _key("hinduism")),
         ("spirituality", "Spirituality", _key("spirituality")),
     ]),
-    ("arts-and-culture", "Arts and culture", [
+    ("arts", "Arts", [
         ("architecture", "Architecture", _key("architecture")),
         ("art", "Art", _key("art", "art__art_instruction")),
         ("art-history", "Art history", _key("history_of_art__art__design_styles")),
@@ -139,9 +159,6 @@ _CATEGORIES: list[tuple[str, str, list[_Row]]] = [
         ("theater", "Theater", _key("drama", "plays", "theater")),
         ("poetry", "Poetry", _key("poetry")),
         (None, None, _key("sculpture")),
-        (None, None, _key("literary_criticism")),
-        ("folklore", "Folklore", _key("folklore")),
-        ("humor", "Humor", _key("humor")),
     ]),
     ("health-and-self-help", "Health and self-help", [
         ("self-help", "Self-help", _key("mental_health", "self-help", "self-help_techniques")),
@@ -170,7 +187,7 @@ _CATEGORIES: list[tuple[str, str, list[_Row]]] = [
         ("marketing", "Marketing", _key("marketing")),
     ]),
     ("politics-and-law", "Politics and law", [
-        ("politics", "Politics", _key("political_science", "politics_and_government", "public_administration")),
+        ("politics", "Politics", _key("political_science")),
         ("law", "Law", _key("law")),
         ("foreign-affairs", "Foreign affairs", _key("international_relations")),
         (None, None, _key("economic_policy")),
@@ -206,20 +223,21 @@ _INTERESTS: list[tuple[str, str, str, Optional[str]]] = [
     ("thrillers", "Thrillers", "crime-and-thrillers", "thrillers"),
     ("horror", "Horror", "crime-and-thrillers", "horror"),
     ("romance", "Romance", "romance", None),
+    ("fantasy", "Fantasy", "fantasy", None),
     ("fantasy-romance", "Fantasy romance", "fantasy", "romance"),
     ("sci-fi", "Sci-fi", "sci-fi", None),
-    ("fantasy", "Fantasy", "fantasy", None),
     ("fiction", "Fiction", "fiction", None),
     ("historical-fiction", "Historical fiction", "fiction", "historical"),
-    ("action-and-adventure", "Action and adventure", "fiction", "adventure"),
+    ("adventure", "Adventure", "fiction", "adventure"),
     ("classics", "Classics", "classics", None),
     ("childrens-books", "Children’s books", "childrens-books", None),
+    ("humor", "Humor", "humor", None),
     ("biography", "Biography", "biography", None),
     ("history", "History", "history", None),
     ("philosophy", "Philosophy", "philosophy-and-religion", "philosophy"),
     ("religion", "Religion", "philosophy-and-religion", "religion"),
-    ("arts-and-culture", "Arts and culture", "arts-and-culture", None),
-    ("poetry", "Poetry", "arts-and-culture", "poetry"),
+    ("arts", "Arts", "arts", None),
+    ("poetry", "Poetry", "arts", "poetry"),
     ("cooking", "Cooking", "food-and-lifestyle", "cooking"),
     ("self-help", "Self-help", "health-and-self-help", "self-help"),
     ("travel", "Travel", "food-and-lifestyle", "travel"),
@@ -243,20 +261,30 @@ def plain_keys(clause: str) -> list[str]:
     return keys
 
 
+def _source(category_code: str, sub: Optional[str], row: str) -> str:
+    """The clause a row searches: the row itself, or in a non-fiction
+    category the row without the books tagged as fiction."""
+    if category_code in _NON_FICTION and (category_code, sub) not in _LITERARY_FORMS:
+        return f"({row} AND {NOT_FICTION})"
+    return row
+
+
 def _category(code: str, name: str, rows: list[_Row]) -> dict:
+    # The keys come from the rows as the design gives them: the fiction
+    # keys a row leaves out do not name the category.
     keys = list(dict.fromkeys(k for _, _, q in rows for k in plain_keys(q)))
     return {
         "code": code,
         "presentable_name": name,
         "icon": f"browse-{code}",
-        "sources": [q for _, _, q in rows],
+        "sources": [_source(code, sub, q) for sub, _, q in rows],
         "keys": keys,
         "address": {"category": code},
         "subcategories": [
             {
                 "code": sub,
                 "presentable_name": label,
-                "sources": [q],
+                "sources": [_source(code, sub, q)],
                 "address": {"category": code, "subcategory": sub},
             }
             for sub, label, q in rows

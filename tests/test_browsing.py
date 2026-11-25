@@ -3,12 +3,14 @@
 and what a new reader is asked to pick."""
 from __future__ import annotations
 
+from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
 import pyopds2_openlibrary as openlibrary
 from pyopds2_openlibrary import OpenLibraryDataProvider
 from pyopds2_openlibrary.browsing import (
     BROWSE_CATEGORIES,
+    NOT_FICTION,
     READING_INTERESTS,
     category,
     plain_keys,
@@ -22,17 +24,17 @@ def _query(href: str) -> dict:
 
 
 class TestTheDesignsLists:
-    def test_sixteen_categories_96_subcategories_and_15_hidden_rows(self):
-        assert len(BROWSE_CATEGORIES) == 16
-        assert sum(len(c["subcategories"]) for c in BROWSE_CATEGORIES) == 96
+    def test_seventeen_categories_95_subcategories_and_15_hidden_rows(self):
+        assert len(BROWSE_CATEGORIES) == 17
+        assert sum(len(c["subcategories"]) for c in BROWSE_CATEGORIES) == 95
         assert sum(len(c["sources"]) - len(c["subcategories"]) for c in BROWSE_CATEGORIES) == 15
 
-    def test_25_interests_in_the_designs_order(self):
+    def test_26_interests_in_the_designs_order(self):
         assert [i["presentable_name"] for i in READING_INTERESTS] == [
-            "Crime", "True crime", "Thrillers", "Horror", "Romance", "Fantasy romance", "Sci-fi",
-            "Fantasy", "Fiction", "Historical fiction", "Action and adventure", "Classics",
-            "Children’s books", "Biography", "History", "Philosophy", "Religion", "Arts and culture",
-            "Poetry", "Cooking", "Self-help", "Travel", "Business", "Politics", "Science",
+            "Crime", "True crime", "Thrillers", "Horror", "Romance", "Fantasy", "Fantasy romance",
+            "Sci-fi", "Fiction", "Historical fiction", "Adventure", "Classics", "Children’s books",
+            "Humor", "Biography", "History", "Philosophy", "Religion", "Arts", "Poetry", "Cooking",
+            "Self-help", "Travel", "Business", "Politics", "Science",
         ]
 
     def test_codes_are_unique_in_their_list(self):
@@ -53,6 +55,63 @@ class TestTheDesignsLists:
         assert classics["subcategories"] == []
         assert classics["sources"] == ['subject_key:"classic_literature"']
 
+    def test_humor_is_a_category_of_its_own_with_no_subcategories(self):
+        humor = category("humor")
+        assert humor["subcategories"] == []
+        assert humor["sources"] == ['subject_key:"humor"']
+        assert subcategory("arts", "humor") is None
+
+    def test_funny_is_childrens_fiction_that_is_humorous(self):
+        assert subcategory("childrens-books", "funny")["sources"] == [
+            'subject_key:("children\'s_fiction" AND "humorous_stories")',
+        ]
+
+    def test_the_politics_chip_is_political_science_alone(self):
+        assert subcategory("politics-and-law", "politics")["sources"] == [
+            f'(subject_key:"political_science" AND {NOT_FICTION})',
+        ]
+
+
+class TestNonFiction:
+    def test_a_non_fiction_row_leaves_out_fiction(self):
+        assert subcategory("history", "ancient")["sources"] == [
+            f'(subject_key:("ancient_civilization" OR "ancient_history") AND {NOT_FICTION})',
+        ]
+        assert NOT_FICTION == 'NOT subject_key:("children\'s_fiction" OR "fiction" OR "juvenile_fiction")'
+
+    def test_every_row_of_a_non_fiction_category_hidden_ones_included(self):
+        for code in (
+            "biography", "history", "philosophy-and-religion", "health-and-self-help",
+            "food-and-lifestyle", "business", "politics-and-law", "science-and-learning",
+        ):
+            assert all(s.endswith(f" AND {NOT_FICTION})") for s in category(code)["sources"]), code
+
+    def test_poetry_and_theater_are_literary_forms_and_keep_fiction(self):
+        assert subcategory("arts", "poetry")["sources"] == ['subject_key:"poetry"']
+        assert subcategory("arts", "theater")["sources"] == ['subject_key:("drama" OR "plays" OR "theater")']
+        assert subcategory("arts", "music")["sources"][0].endswith(f" AND {NOT_FICTION})")
+        assert category("arts")["sources"][-1] == f'(subject_key:"sculpture" AND {NOT_FICTION})'
+
+    def test_fiction_categories_and_humor_keep_fiction(self):
+        for code in ("crime-and-thrillers", "romance", "fantasy", "sci-fi", "fiction", "classics", "childrens-books", "humor"):
+            assert not any(NOT_FICTION in s for s in category(code)["sources"]), code
+
+    def test_an_interest_of_a_non_fiction_category_leaves_out_fiction_too(self):
+        assert all(NOT_FICTION in s for s in reading_interest("science")["sources"])
+        arts = reading_interest("arts")["sources"]
+        # All but Poetry and Theater.
+        assert sum(NOT_FICTION in s for s in arts) == len(arts) - 2
+
+    def test_the_fiction_keys_a_row_leaves_out_do_not_name_the_category(self):
+        assert "fiction" not in category("history")["keys"]
+        assert "juvenile_fiction" not in category("science-and-learning")["keys"]
+
+    def test_the_whole_query_still_takes_the_readers_languages(self):
+        with patch.object(openlibrary, "fetch_languages_map", return_value={"eng": "en", "fre": "fr"}):
+            query = openlibrary.genre_author_query(category("history"), "en,fr")
+        assert query.startswith(f'((subject_key:"history" AND {NOT_FICTION}) OR ')
+        assert query.endswith(" language:(eng OR fre)")
+
 
 class TestInterests:
     def test_an_interest_is_one_subcategory(self):
@@ -66,6 +125,14 @@ class TestInterests:
         # The hidden row and Fantasy romance's are in it too.
         assert interest["sources"] == category("fantasy")["sources"]
         assert 'subject_key:"fiction_romance_fantasy"' in interest["sources"]
+
+    def test_new_and_renamed_interests(self):
+        assert reading_interest("humor")["address"] == {"category": "humor"}
+        assert reading_interest("humor")["icon"] == "interest-humor"
+        assert reading_interest("arts")["address"] == {"category": "arts"}
+        assert reading_interest("adventure")["address"] == {"category": "fiction", "subcategory": "adventure"}
+        assert reading_interest("arts-and-culture") is None
+        assert reading_interest("action-and-adventure") is None
 
     def test_politics_is_all_of_politics_and_law(self):
         assert reading_interest("politics")["address"] == {"category": "politics-and-law"}
@@ -83,7 +150,7 @@ class TestQueries:
 
     def test_a_row_keeps_its_conditions(self):
         query = openlibrary.genre_query(subcategory("biography", "women"))
-        assert query.startswith('subject_key:("biography" AND "women") ')
+        assert query.startswith(f'(subject_key:("biography" AND "women") AND {NOT_FICTION}) ')
 
     def test_the_plain_keys_leave_out_a_key_that_counts_only_with_another(self):
         assert plain_keys('subject_key:("biography" AND "history")') == []
