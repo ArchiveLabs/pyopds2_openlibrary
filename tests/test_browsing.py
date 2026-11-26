@@ -114,31 +114,37 @@ class TestNonFiction:
 
 
 class TestInterests:
+    def test_an_interest_is_addressed_by_its_own_code(self):
+        # Not by its category's codes: its page has no subcategories to
+        # choose from, as a category's has.
+        assert reading_interest("crime")["address"] == {"interest": "crime"}
+        assert reading_interest("romance")["address"] == {"interest": "romance"}
+
     def test_an_interest_is_one_subcategory(self):
         interest = reading_interest("historical-fiction")
-        assert interest["address"] == {"category": "fiction", "subcategory": "historical"}
+        assert interest["target"] == {"category": "fiction", "subcategory": "historical"}
         assert interest["sources"] == subcategory("fiction", "historical")["sources"]
 
     def test_an_interest_is_one_whole_category(self):
         interest = reading_interest("fantasy")
-        assert interest["address"] == {"category": "fantasy"}
+        assert interest["target"] == {"category": "fantasy"}
         # The hidden row and Fantasy romance's are in it too.
         assert interest["sources"] == category("fantasy")["sources"]
         assert 'subject_key:"fiction_romance_fantasy"' in interest["sources"]
 
     def test_new_and_renamed_interests(self):
-        assert reading_interest("humor")["address"] == {"category": "humor"}
+        assert reading_interest("humor")["target"] == {"category": "humor"}
         assert reading_interest("humor")["icon"] == "interest-humor"
-        assert reading_interest("arts")["address"] == {"category": "arts"}
-        assert reading_interest("adventure")["address"] == {"category": "fiction", "subcategory": "adventure"}
+        assert reading_interest("arts")["target"] == {"category": "arts"}
+        assert reading_interest("adventure")["target"] == {"category": "fiction", "subcategory": "adventure"}
         assert reading_interest("arts-and-culture") is None
         assert reading_interest("action-and-adventure") is None
 
     def test_politics_is_all_of_politics_and_law(self):
-        assert reading_interest("politics")["address"] == {"category": "politics-and-law"}
+        assert reading_interest("politics")["target"] == {"category": "politics-and-law"}
 
     def test_science_is_the_science_chip_not_education_or_languages(self):
-        assert reading_interest("science")["address"] == {"category": "science-and-learning", "subcategory": "science"}
+        assert reading_interest("science")["target"] == {"category": "science-and-learning", "subcategory": "science"}
 
 
 class TestQueries:
@@ -222,5 +228,5 @@ class TestInterestNavigation:
         assert nav.title == "True crime"
         assert nav.properties == {"code": "true-crime", "icon": "interest-true-crime"}
         assert _query(nav.href) == {
-            "sort": ["trending"], "category": ["crime-and-thrillers"], "subcategory": ["true-crime"], "language": ["en"],
+            "sort": ["trending"], "interest": ["true-crime"], "language": ["en"],
         }

@@ -317,7 +317,11 @@ def _interest(code: str, name: str, category_code: str, sub: Optional[str]) -> d
         "presentable_name": name,
         "icon": f"interest-{code}",
         "sources": list(target["sources"]),
-        "address": dict(target["address"]),
+        # Its own address, not its category's: an interest's page is its
+        # books alone, with no All and no subcategories to choose from.
+        "address": {"interest": code},
+        # The category or subcategory it is, by its codes.
+        "target": dict(target["address"]),
     }
 
 

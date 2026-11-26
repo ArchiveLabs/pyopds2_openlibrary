@@ -1280,7 +1280,7 @@ def genre_href(
     entry: what the front page's navigation links, and a work's Popular in
     shelf with it. A browsing category, a subcategory and a reading interest
     are addressed by their codes (``address``: ``category`` and
-    ``subcategory``), and the search makes their query; any other genre
+    ``subcategory``, or ``interest``), and the search makes their query; any other genre
     carries its title and query."""
     params: dict[str, str] = {"sort": "trending"}
     if subject.get("address"):
@@ -3241,7 +3241,7 @@ class OpenLibraryDataProvider(DataProvider):
             total: Unused; kept for callers that pass it.
             availability_counts: ``{mode_value: item_count}`` per OPDS 2.0 §2.4.
             address: A browsing category's page's ``category`` and
-                ``subcategory``, in every href in place of the query and
+                ``subcategory``, or a reading interest's ``interest``, in every href in place of the query and
                 the title, which the search makes from them.
         """
         language = canonical_language(language)
