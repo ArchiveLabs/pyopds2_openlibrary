@@ -21,6 +21,7 @@ from pyopds2_openlibrary.browsing import (
     READING_INTERESTS,
     category as browse_category,
     reading_interest,
+    work_interest,
     subcategory as browse_subcategory,
 )
 from pyopds2 import (
@@ -63,7 +64,8 @@ class Subject(BaseModel):
     The one exception is a work's genre, which is drawn from the catalogue's
     own list, its browsing categories (``FEATURED_SUBJECTS``): it carries
     ``scheme`` (``SCHEME_GENRE``) and ``code``, the category's code, so a
-    client can find it among the rest.
+    client can find it among the rest. So does the reading interest the
+    work counts for (``SCHEME_INTEREST``, the interest's code).
     """
     name: str
     scheme: Optional[str] = None
@@ -519,6 +521,23 @@ class OpenLibraryDataRecord(BookSharedDoc, DataProviderRecord):
                     type="application/opds+json",
                     href=genre_href(
                         f"{opds_base}/search", genre,
+                        language=language if language is not None else self.request_language,
+                    ),
+                )],
+            ))
+        # Then the reading interest it counts for, the most specific one,
+        # marked by its own scheme and linked to the interest's books: what a
+        # client counts a reader's library by.
+        interest = work_interest(self.subject)
+        if interest is not None:
+            subjects.append(Subject(
+                name=interest["presentable_name"],
+                scheme=SCHEME_INTEREST,
+                code=interest["code"],
+                links=[Link(
+                    type="application/opds+json",
+                    href=genre_href(
+                        f"{opds_base}/search", interest,
                         language=language if language is not None else self.request_language,
                     ),
                 )],
@@ -2675,6 +2694,11 @@ REL_PORTRAIT: str = "https://openlibrary.org/opds/rel/portrait"
 # documented on the same page: the subject that is the work's genre, the one
 # of the catalogue's genres its Popular in shelf is drawn from.
 SCHEME_GENRE: str = "https://openlibrary.org/opds/rel/genre"
+# A subject scheme too: the subject that is the reading interest the work
+# counts for, the most specific of them it matches (``work_interest``), so
+# a client can tell what a reader's books are about in the words of the
+# interests it asks them to pick.
+SCHEME_INTEREST: str = "https://openlibrary.org/opds/rel/interest"
 # The front page's templated link to the authors the readers of the genres
 # named by ``genre`` (their codes, comma-separated) read: the authors a
 # client offers a new reader to follow.

@@ -331,3 +331,122 @@ READING_INTERESTS: list[dict] = [_interest(*i) for i in _INTERESTS]
 def reading_interest(code: Optional[str]) -> Optional[dict]:
     """The reading interest named by ``code``, or None."""
     return next((i for i in READING_INTERESTS if i["code"] == code), None)
+
+
+# The characters Open Library drops when it makes a subject's key from its
+# name (``normalize_subject_name`` in openlibrary/utils): what the rows'
+# ``subject_key`` clauses are matched against.
+_SUBJECT_CHARS_TO_DROP = frozenset(""";/?:@&=+$,<>#%"{}|\\^[]`\n\r""")
+
+
+def subject_key(name: str) -> str:
+    """The key Open Library gives a subject: ``"Fiction, romance, fantasy"``
+    is ``fiction_romance_fantasy``."""
+    return "".join("_" if c == " " else c for c in name.strip().lower() if c not in _SUBJECT_CHARS_TO_DROP)
+
+
+_TOKEN = re.compile(r'\s*(\(|\)|"[^"]*"|[A-Za-z_]+:|AND\b|OR\b|NOT\b)')
+
+
+def _tokens(clause: str) -> list[str]:
+    out: list[str] = []
+    at = 0
+    while at < len(clause):
+        if clause[at:].strip() == "":
+            break
+        found = _TOKEN.match(clause, at)
+        if found is None:
+            raise ValueError(f"cannot read the clause at {clause[at:]!r}")
+        out.append(found.group(1))
+        at = found.end()
+    return out
+
+
+def clause_matches(clause: str, keys: set[str], names: set[str]) -> bool:
+    """Whether a work with these subject ``keys`` and subject ``names`` (in
+    lower case) is among a row's books: the row's Solr clause read on the
+    work, as Solr would. Only what the rows are written with is read:
+    ``subject_key:`` and ``subject:`` on a quoted value or a group of them,
+    AND, OR, NOT and brackets, AND before OR."""
+    tokens = _tokens(clause)
+    at = 0
+
+    def peek() -> Optional[str]:
+        return tokens[at] if at < len(tokens) else None
+
+    def take() -> str:
+        nonlocal at
+        at += 1
+        return tokens[at - 1]
+
+    def value(field: str) -> bool:
+        def one(token: str) -> bool:
+            word = token.strip('"')
+            return word in keys if field == "subject_key:" else word.lower() in names
+
+        if peek() != "(":
+            return one(take())
+        take()
+        result: Optional[bool] = None
+        op = "OR"
+        while peek() != ")":
+            token = take()
+            if token in ("AND", "OR"):
+                op = token
+                continue
+            hit = one(token)
+            result = hit if result is None else (result and hit if op == "AND" else result or hit)
+        take()
+        return bool(result)
+
+    def term() -> bool:
+        token = take()
+        if token == "NOT":
+            return not term()
+        if token == "(":
+            result = either()
+            take()
+            return result
+        return value(token)
+
+    def both() -> bool:
+        result = term()
+        while peek() not in (None, ")", "OR"):
+            if peek() == "AND":
+                take()
+            hit = term()
+            result = result and hit
+        return result
+
+    def either() -> bool:
+        result = both()
+        while peek() == "OR":
+            take()
+            hit = both()
+            result = result or hit
+        return result
+
+    return either()
+
+
+def work_interest(subjects: Optional[list[str]]) -> Optional[dict]:
+    """The reading interest a work counts for, the most specific it matches:
+    an interest that is a subcategory before one that is a whole category,
+    so a fantasy romance is Fantasy romance, and not Fantasy or Romance.
+    Among interests as specific, the one the most of the work's subjects
+    name, ties to the onboarding's order. None for a work in no interest."""
+    if not subjects:
+        return None
+    keys = {subject_key(name) for name in subjects}
+    names = {name.strip().lower() for name in subjects}
+    best: Optional[tuple[int, int, int]] = None
+    found: Optional[dict] = None
+    for order, interest in enumerate(READING_INTERESTS):
+        if not any(clause_matches(source, keys, names) for source in interest["sources"]):
+            continue
+        specific = 1 if "subcategory" in interest["target"] else 0
+        named = sum(1 for source in interest["sources"] for k in plain_keys(source) if k in keys)
+        rank = (specific, named, -order)
+        if best is None or rank > best:
+            best, found = rank, interest
+    return found

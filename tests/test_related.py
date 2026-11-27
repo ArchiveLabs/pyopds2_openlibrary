@@ -182,8 +182,9 @@ class TestGenreSubject:
         assert [s.name for s in publication.metadata.subject] == ["Whaling"]
 
     def test_the_other_subjects_carry_no_scheme(self):
+        # The genre, the interest (tests/test_interest.py), then the rest.
         publication = _work().to_work_publication([])
-        assert [s.scheme for s in publication.metadata.subject[1:]] == [None, None, None]
+        assert [s.scheme for s in publication.metadata.subject[2:]] == [None, None, None]
 
     def test_it_is_written_out_with_its_scheme_and_code(self):
         dumped = _work().to_work_publication([], "en").model_dump(mode="json", exclude_none=True, by_alias=True)
